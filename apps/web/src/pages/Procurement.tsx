@@ -1,3 +1,4 @@
+import { SkeletonRows } from "../components/Skeleton";
 import { CSSProperties, FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
 

@@ -1,0 +1,30 @@
+@media (max-width: 768px) {
+  .app-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: 64px;
+    padding: 0 !important;
+    border-right: none !important;
+    border-top: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: row;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    z-index: 40;
+  }
+  .app-nav > div:first-child {
+    display: none;
+  }
+  .app-nav a {
+    flex: 1;
+    text-align: center;
+    padding: 12px 4px 14px !important;
+    font-size: 11px !important;
+  }
+  main {
+    padding: 16px !important;
+    padding-bottom: 80px !important;
+  }
+}

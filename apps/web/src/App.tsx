@@ -1,6 +1,7 @@
 import { Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./layout/AppShell";
+import { PublicLayout } from "./layout/PublicLayout";
 import { Admin } from "./pages/Admin";
 import { Billing } from "./pages/Billing";
 import { Dashboard } from "./pages/Dashboard";
@@ -19,15 +20,17 @@ import { Terms } from "./pages/Terms";
 export function App() {
   return (
     <Routes>
-      {/* Public pages */}
-      <Route path="/" element={<Home />} />
-      <Route path="/login" element={<Login />} />
-      <Route path="/signup" element={<SignUp />} />
-      <Route path="/demo" element={<Demo />} />
-      <Route path="/terms" element={<Terms />} />
-      <Route path="/privacy" element={<Privacy />} />
+      {/* Public pages: minimalist black */}
+      <Route element={<PublicLayout />}>
+        <Route path="/" element={<Home />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<SignUp />} />
+        <Route path="/demo" element={<Demo />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+      </Route>
 
-      {/* Authenticated app */}
+      {/* Authenticated app: glass over nature */}
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/app" element={<Dashboard />} />

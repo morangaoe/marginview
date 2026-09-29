@@ -184,10 +184,6 @@ export function Procurement() {
       )}
 
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Procurement suggestions</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        Ranked by urgency. Each suggestion shows why it surfaced and how long stock will last.
-      </p>
-
       {error && (
         <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
           {error}
@@ -206,7 +202,7 @@ export function Procurement() {
       )}
 
       <div className="card">
-        {!error && rows === null && <p>Loading…</p>}
+        {!error && rows === null && <SkeletonRows rows={5} />}
         {rows?.length === 0 && <p style={{ color: "var(--slate)" }}>No open suggestions right now.</p>}
         {rows && rows.length > 0 && (
           <table>

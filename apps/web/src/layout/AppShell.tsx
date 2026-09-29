@@ -14,92 +14,24 @@ export function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  function handleLogout() {
-    logout();
-    navigate("/login");
-  }
-
   return (
-    <div style={{ display: "flex", height: "100%" }}>
-      <nav
-        className="app-nav"
-        style={{
-          width: 220,
-          background: "var(--card)",
-          borderRight: "1px solid var(--hairline)",
-          padding: "20px 0",
-          flexShrink: 0,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <div style={{ fontWeight: 700, fontSize: 18, padding: "0 20px 20px", color: "var(--accent)" }}>
-          Marginview
-        </div>
+    <div className="mv-app" style={{ display: "flex" }}>
+      <div className="mv-bg" aria-hidden />
+      <nav className="app-nav" style={{ width: 220, borderRight: "1px solid var(--hairline)", padding: "20px 0", flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div className="mv-logo" style={{ padding: "0 24px 20px" }}><i />Marginview</div>
 
-        {NAV_TABS.map((tab) => (
-          <NavLink
-            key={tab.to}
-            to={tab.to}
-            end={tab.end}
-            style={({ isActive }) => ({
-              display: "block",
-              padding: "10px 20px",
-              textDecoration: "none",
-              color: isActive ? "var(--ink)" : "var(--slate)",
-              fontWeight: isActive ? 600 : 400,
-              fontSize: 14,
-            })}
-          >
-            {tab.label}
-          </NavLink>
+        {NAV_TABS.map((t) => (
+          <NavLink key={t.to} to={t.to} end={t.end} className="mv-nav-item">{t.label}</NavLink>
         ))}
 
-        {/* Divider */}
         <div style={{ borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
+        <NavLink to="/app/settings" className="mv-nav-item">Settings</NavLink>
+        {user?.role === "owner" && <NavLink to="/app/admin" className="mv-nav-item">Team & access</NavLink>}
 
-        <NavLink
-          to="/app/settings"
-          style={({ isActive }) => ({
-            display: "block",
-            padding: "10px 20px",
-            textDecoration: "none",
-            color: isActive ? "var(--ink)" : "var(--slate)",
-            fontWeight: isActive ? 600 : 400,
-            fontSize: 14,
-          })}
-        >
-          Settings
-        </NavLink>
-
-        {user?.role === "owner" && (
-          <NavLink
-            to="/app/admin"
-            style={({ isActive }) => ({
-              display: "block",
-              padding: "10px 20px",
-              textDecoration: "none",
-              color: isActive ? "var(--ink)" : "var(--slate)",
-              fontWeight: isActive ? 600 : 400,
-              fontSize: 14,
-            })}
-          >
-            Team & access
-          </NavLink>
-        )}
-
-        {/* Spacer pushes user info to bottom */}
         <div style={{ flex: 1 }} />
-
-        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--hairline)" }}>
-          <div style={{ fontSize: 12, color: "var(--slate)", marginBottom: 2 }}>
-            {user?.role ?? "—"}
-          </div>
-          <button
-            onClick={handleLogout}
-            className="btn"
-            style={{ fontSize: 12, width: "100%", textAlign: "left", border: "none", padding: "6px 0", color: "var(--slate)" }}
-          >
+        <div style={{ padding: "12px 24px", borderTop: "1px solid var(--hairline)" }}>
+          <div className="mono" style={{ fontSize: 11, color: "var(--slate)" }}>{user?.role ?? "—"}</div>
+          <button onClick={() => { logout(); navigate("/login"); }} className="btn" style={{ width: "100%", justifyContent: "flex-start", border: "none", background: "none", padding: "6px 0", fontSize: 12, color: "var(--slate)" }}>
             Sign out
           </button>
         </div>
@@ -108,7 +40,6 @@ export function AppShell() {
       <main style={{ flex: 1, padding: 28, overflow: "auto" }}>
         <Outlet />
       </main>
-
       <AiAssistant />
     </div>
   );

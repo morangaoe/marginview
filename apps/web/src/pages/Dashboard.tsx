@@ -69,10 +69,6 @@ export function Dashboard() {
   return (
     <div>
       <h1 style={{ fontSize: 22, margin: "0 0 2px" }}>Dashboard</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        Good morning{user ? "" : ""}. Here's what needs attention.
-      </p>
-
       {error && (
         <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 14px", fontSize: 13, marginBottom: 16 }}>
           {error} Is the API running on port 4000?
@@ -114,7 +110,7 @@ export function Dashboard() {
             <strong style={{ fontSize: 14 }}>Inventory alerts</strong>
             <Link to="/app/inventory" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
           </div>
-          {inventory === null && <p style={{ color: "var(--slate)", fontSize: 13 }}>Loading…</p>}
+          {inventory === null && <SkeletonRows rows={3} />}
           {inventory?.length === 0 && <p style={{ color: "var(--slate)", fontSize: 13 }}>No products yet.</p>}
           {[...outOfStock, ...lowStock].length === 0 && inventory !== null && inventory.length > 0 && (
             <p style={{ color: "var(--success)", fontSize: 13 }}>✓ All inventory levels are healthy.</p>
@@ -136,7 +132,7 @@ export function Dashboard() {
             <strong style={{ fontSize: 14 }}>Procurement</strong>
             <Link to="/app/procurement" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
           </div>
-          {suggestions === null && <p style={{ color: "var(--slate)", fontSize: 13 }}>Loading…</p>}
+          {suggestions === null && <SkeletonRows rows={3} />}
           {suggestions?.length === 0 && <p style={{ color: "var(--success)", fontSize: 13 }}>✓ No open reorder suggestions.</p>}
           {suggestions?.slice(0, 5).map(s => (
             <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--hairline)" }}>
@@ -160,7 +156,7 @@ export function Dashboard() {
             <strong style={{ fontSize: 14 }}>Competitor pricing alerts</strong>
             <Link to="/app/pricing" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
           </div>
-          {sources === null && <p style={{ color: "var(--slate)", fontSize: 13 }}>Loading…</p>}
+          {sources === null && <SkeletonRows rows={3} />}
           {sources?.length === 0 && (
             <p style={{ color: "var(--slate)", fontSize: 13 }}>
               No competitors tracked yet.{" "}

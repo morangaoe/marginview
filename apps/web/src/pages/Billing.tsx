@@ -22,7 +22,7 @@ export function Billing() {
   }, []);
 
   if (error) return <p style={{ color: "var(--critical)" }}>{error}</p>;
-  if (!usage) return <p>Loading…</p>;
+  if (!usage) return <SkeletonRows rows={5} />;
 
   const pct =
     usage.trackedSourcesIncluded !== null
@@ -32,10 +32,6 @@ export function Billing() {
   return (
     <div>
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Billing</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        Your plan and current usage of tracked competitor sources, the metric your plan is based on.
-      </p>
-
       <div className="card" style={{ marginBottom: 16 }}>
         <strong>{usage.planName}</strong>
         <p style={{ color: "var(--slate)", fontSize: 13, margin: "4px 0 0" }}>

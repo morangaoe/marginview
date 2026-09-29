@@ -172,7 +172,7 @@ export function Pricing() {
   }
 
   if (error) return <p style={{ color: "var(--critical)" }}>{error}</p>;
-  if (!data) return <p>Loading…</p>;
+  if (!data) return <SkeletonRows rows={5} />;
 
   const { variant, competitors } = data;
   const lowestCompetitor = competitors
@@ -188,10 +188,6 @@ export function Pricing() {
       </div>
 
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>Pricing intelligence</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        {variant.sku} · unit cost {money(variant.unit_cost_cents, variant.currency)}
-      </p>
-
       {/* Market snapshot */}
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>

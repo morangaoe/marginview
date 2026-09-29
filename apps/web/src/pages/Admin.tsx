@@ -107,10 +107,6 @@ export function Admin() {
   return (
     <div>
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Team & access</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        Manage who can access your Marginview account and what they can do.
-      </p>
-
       {error && <div style={errorStyle}>{error}</div>}
       {success && <div style={successStyle}>{success}</div>}
 

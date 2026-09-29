@@ -1,145 +1,137 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { Skeleton } from "../components/Skeleton";
+
+const TICKER = [
+  ["ACME Corp", -3.2], ["BlueLine Supply", 1.8], ["CrestWholesale", -0.6], ["Delta Goods", 4.1],
+  ["Eastern Trade", -1.1], ["Fairway Dist", 2.7], ["Granite Parts", -0.3], ["HorizonB2B", 5.2],
+] as const;
 
 const FEATURES = [
-  {
-    icon: "📊",
-    title: "Real-time competitor pricing",
-    body: "Marginview crawls competitor pages automatically and flags anything out of band — so you see the market move before your margin does.",
-  },
-  {
-    icon: "🧠",
-    title: "Six pricing strategies, one click",
-    body: "Cost-plus, dynamic, keystone, penetration, price skimming, value-based — preview any strategy against live data before applying.",
-  },
-  {
-    icon: "📦",
-    title: "Inventory & procurement in one place",
-    body: "Reorder suggestions are generated automatically from velocity and lead time. One click turns a suggestion into a draft purchase order.",
-  },
-  {
-    icon: "🔒",
-    title: "Roles built in",
-    body: "Owner, Pricing Manager, Inventory Manager, Viewer — every action is enforced server-side, not behind a hidden button.",
-  },
+  { title: "Real-time competitor pricing", body: "Out-of-band prices are flagged before your margin feels them." },
+  { title: "Six pricing strategies, one click", body: "Preview cost-plus, dynamic, keystone and more against live data." },
+  { title: "Inventory and procurement together", body: "Reorder suggestions turn into draft purchase orders in one click." },
+  { title: "Roles built in", body: "Every action is enforced on the server, not behind a hidden button." },
 ];
 
 const PLANS = [
-  { name: "Starter", price: "$49", sources: "15 tracked sources", skus: "200 SKU soft limit" },
-  { name: "Growth", price: "$199", sources: "100 tracked sources", skus: "2,000 SKU soft limit" },
-  { name: "Scale", price: "Custom", sources: "Unlimited sources", skus: "Unlimited SKUs" },
+  { name: "Starter", price: "$49", items: ["15 tracked sources", "200 SKU soft limit"], cta: "Get started" },
+  { name: "Growth", price: "$199", items: ["100 tracked sources", "2,000 SKU soft limit"], cta: "Get started", hi: true },
+  { name: "Scale", price: "Custom", items: ["Unlimited sources", "Unlimited SKUs"], cta: "Contact sales" },
 ];
+
+type Row = { sku: string; yours: number; a: number; b: number; delta: number; flash?: boolean };
+const SEED: Row[] = [
+  { sku: "SKU-4821", yours: 24.99, a: 27.5, b: 23.4, delta: -6.3 },
+  { sku: "SKU-1103", yours: 89, a: 84.95, b: 91.2, delta: 4.8 },
+  { sku: "SKU-7756", yours: 12.5, a: 12.5, b: 13, delta: 0 },
+  { sku: "SKU-3390", yours: 145, a: 138, b: 149.99, delta: 5.1 },
+  { sku: "SKU-6614", yours: 5.99, a: 6.49, b: 5.75, delta: -4 },
+];
+
+function LiveTable() {
+  const [rows, setRows] = useState<Row[] | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setRows(SEED), 900); // skeleton first, then data
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!rows) return;
+    const id = setInterval(() => {
+      setRows((prev) => prev && prev.map((r) => {
+        if (Math.random() > 0.45) return { ...r, flash: false };
+        const d = +((Math.random() - 0.5) * 8).toFixed(1);
+        return { ...r, delta: d, yours: Math.max(1, +(r.yours + d * 0.1).toFixed(2)), a: +(r.a + (Math.random() - 0.5) * 0.4).toFixed(2), flash: true };
+      }));
+    }, 2200);
+    return () => clearInterval(id);
+  }, [rows !== null]);
+
+  return (
+    <div className="mv-table" aria-live="off">
+      <div className="mv-row head">{["SKU", "Your price", "Competitor A", "Competitor B", "Change"].map((h) => <span key={h}>{h}</span>)}</div>
+      {rows
+        ? rows.map((r) => (
+            <div className="mv-row" key={r.sku}>
+              <span style={{ color: "var(--slate)" }}>{r.sku}</span>
+              <span className={r.flash ? "mv-flash" : ""}>${r.yours.toFixed(2)}</span>
+              <span style={{ color: "rgba(255,255,255,.6)" }}>${r.a.toFixed(2)}</span>
+              <span style={{ color: "rgba(255,255,255,.6)" }}>${r.b.toFixed(2)}</span>
+              <span className={r.delta > 0.2 ? "up" : r.delta < -0.2 ? "down" : "flat"}>
+                {r.delta > 0.2 ? "↑" : r.delta < -0.2 ? "↓" : "—"} {Math.abs(r.delta).toFixed(1)}%
+              </span>
+            </div>
+          ))
+        : SEED.map((r) => (
+            <div className="mv-row" key={r.sku} role="status" aria-label="Loading">
+              <Skeleton w={64} /><Skeleton w={48} /><Skeleton w={48} /><Skeleton w={48} /><Skeleton w={40} />
+            </div>
+          ))}
+      <div className="mv-live"><i />Live</div>
+    </div>
+  );
+}
 
 export function Home() {
   return (
-    <div style={{ minHeight: "100vh", background: "var(--paper)" }}>
-      {/* Nav */}
-      <nav style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "16px 32px",
-        borderBottom: "1px solid var(--hairline)",
-        background: "var(--card)",
-      }}>
-        <span style={{ fontWeight: 700, fontSize: 18, color: "var(--accent)" }}>Marginview</span>
-        <div style={{ display: "flex", gap: 12 }}>
-          <Link to="/login" className="btn" style={{ fontSize: 13 }}>Sign in</Link>
-          <Link to="/signup" className="btn primary" style={{ fontSize: 13 }}>Start free trial</Link>
-        </div>
-      </nav>
-
-      {/* Hero */}
-      <section style={{ textAlign: "center", padding: "80px 32px 60px" }}>
-        <div style={{
-          display: "inline-block",
-          background: "#EAF3EC",
-          color: "var(--success)",
-          fontSize: 12,
-          fontWeight: 600,
-          padding: "4px 12px",
-          borderRadius: 12,
-          marginBottom: 20,
-        }}>
-          14-day free trial · no card required
-        </div>
-        <h1 style={{ fontSize: 42, fontWeight: 800, margin: "0 0 16px", lineHeight: 1.15 }}>
-          Know what your competitors<br />charge. Always.
-        </h1>
-        <p style={{ fontSize: 17, color: "var(--slate)", maxWidth: 520, margin: "0 auto 32px", lineHeight: 1.6 }}>
-          Marginview monitors competitor prices automatically, models your
-          pricing strategies against live data, and surfaces the procurement
-          actions that protect your margin.
-        </p>
-        <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-          <Link to="/signup" className="btn primary" style={{ padding: "12px 28px", fontSize: 15 }}>
-            Start free trial
-          </Link>
-          <Link to="/demo" className="btn" style={{ padding: "12px 28px", fontSize: 15 }}>
-            See a live demo →
-          </Link>
-        </div>
-      </section>
-
-      {/* Features */}
-      <section style={{ padding: "0 32px 80px", maxWidth: 960, margin: "0 auto" }}>
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
-          gap: 20,
-        }}>
-          {FEATURES.map((f) => (
-            <div key={f.title} className="card" style={{ padding: "24px 20px" }}>
-              <div style={{ fontSize: 28, marginBottom: 12 }}>{f.icon}</div>
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{f.title}</div>
-              <div style={{ color: "var(--slate)", fontSize: 13, lineHeight: 1.55 }}>{f.body}</div>
-            </div>
+    <>
+      <div className="mv-ticker" aria-hidden>
+        <div>
+          {[...TICKER, ...TICKER].map(([n, v], i) => (
+            <span key={i}>{n} <b className={v > 0 ? "up" : "down"} style={{ fontWeight: 400 }}>{v > 0 ? "+" : "−"}{Math.abs(v)}%</b></span>
           ))}
         </div>
-      </section>
+      </div>
 
-      {/* Pricing */}
-      <section style={{
-        background: "var(--card)",
-        borderTop: "1px solid var(--hairline)",
-        borderBottom: "1px solid var(--hairline)",
-        padding: "60px 32px",
-      }}>
-        <h2 style={{ textAlign: "center", fontSize: 26, fontWeight: 700, marginBottom: 8 }}>Simple pricing</h2>
-        <p style={{ textAlign: "center", color: "var(--slate)", fontSize: 14, marginBottom: 36 }}>
-          Billed monthly. Seats are unlimited on every plan — pay for data, not headcount.
-        </p>
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-          gap: 20,
-          maxWidth: 720,
-          margin: "0 auto",
-        }}>
-          {PLANS.map((p) => (
-            <div key={p.name} className="card" style={{ textAlign: "center", padding: "28px 20px" }}>
-              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>{p.name}</div>
-              <div style={{ fontSize: 32, fontWeight: 800, color: "var(--accent)", marginBottom: 4 }}>
-                {p.price}
-                {p.price !== "Custom" && <span style={{ fontSize: 14, fontWeight: 400, color: "var(--slate)" }}>/mo</span>}
+      <main className="mv-wrap">
+        <section className="mv-hero">
+          <div>
+            <div className="mv-badge"><i />14-day free trial, no card required</div>
+            <h1>Know what your competitors charge. Always.</h1>
+            <div className="mv-actions">
+              <Link to="/signup" className="btn primary">Start free trial</Link>
+              <Link to="/demo" className="btn">Watch the demo</Link>
+            </div>
+          </div>
+          <LiveTable />
+        </section>
+
+        <section className="mv-section" id="features">
+          <h2>Built to protect your margin</h2>
+          <div className="mv-features">
+            {FEATURES.map((f) => (
+              <article className="mv-feature" key={f.title}>
+                <h3>{f.title}</h3>
+                <p>{f.body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="mv-section" id="pricing">
+          <h2>Simple pricing</h2>
+          <div className="mv-plans">
+            {PLANS.map((p) => (
+              <div className={`mv-plan ${p.hi ? "hi" : ""}`} key={p.name}>
+                {p.hi && <span className="tag">Most popular</span>}
+                <h3>{p.name}</h3>
+                <div className="mv-price">{p.price}{p.price !== "Custom" && <small>/mo</small>}</div>
+                <ul>{p.items.map((i) => <li key={i}>{i}</li>)}</ul>
+                <Link to="/signup" className={`btn ${p.hi ? "primary" : ""}`}>{p.cta}</Link>
               </div>
-              <div style={{ fontSize: 13, color: "var(--slate)", marginBottom: 6 }}>{p.sources}</div>
-              <div style={{ fontSize: 13, color: "var(--slate)", marginBottom: 20 }}>{p.skus}</div>
-              <Link to="/signup" className="btn primary" style={{ fontSize: 13, display: "block" }}>
-                {p.price === "Custom" ? "Contact sales" : "Get started"}
-              </Link>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      </main>
 
-      {/* Footer */}
-      <footer style={{ textAlign: "center", padding: "32px", fontSize: 12, color: "var(--slate)" }}>
-        <div style={{ display: "flex", gap: 20, justifyContent: "center", marginBottom: 10 }}>
-          <Link to="/terms" style={{ color: "var(--slate)" }}>Terms of Service</Link>
-          <Link to="/privacy" style={{ color: "var(--slate)" }}>Privacy Policy</Link>
+      <footer className="mv-footer">
+        <div className="mv-wrap">
+          <span>© {new Date().getFullYear()} Marginview</span>
+          <span><Link to="/terms">Terms of Service</Link><Link to="/privacy">Privacy Policy</Link></span>
         </div>
-        © {new Date().getFullYear()} Marginview. All rights reserved.
       </footer>
-    </div>
+    </>
   );
 }

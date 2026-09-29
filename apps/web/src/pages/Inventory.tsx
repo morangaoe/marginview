@@ -41,11 +41,9 @@ export function Inventory() {
   return (
     <div>
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Inventory</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>Stock across all locations.</p>
-
       <div className="card">
         {error && <p style={{ color: "var(--critical)" }}>{error}</p>}
-        {!error && rows === null && <p>Loading…</p>}
+        {!error && rows === null && <SkeletonRows rows={5} />}
         {rows && (
           <table>
             <thead>

@@ -24,12 +24,9 @@ export function PricingList() {
   return (
     <div>
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Pricing intelligence</h1>
-      <p style={{ color: "var(--slate)", fontSize: 13, marginBottom: 20 }}>
-        Pick a product to compare against competitors and model a pricing strategy.
-      </p>
       <div className="card">
         {error && <p style={{ color: "var(--critical)" }}>{error}</p>}
-        {!error && rows === null && <p>Loading…</p>}
+        {!error && rows === null && <SkeletonRows rows={5} />}
         {rows?.length === 0 && <p style={{ color: "var(--slate)" }}>No products yet. Add one to get started.</p>}
         {rows && rows.length > 0 && (
           <table>

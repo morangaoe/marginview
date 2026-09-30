@@ -17,7 +17,7 @@ export async function request<T = unknown>(path: string, init: RequestInit = {})
     let msg = `Request failed (${res.status})`;
     try {
       const body = await res.json();
-      if (body?.error) msg = body.error;
+      if (typeof body?.error === "string") msg = body.error; else if (body?.error) msg = "Some fields are invalid. Check the form and try again.";
       else if (body?.message) msg = body.message;
     } catch {
       /* non-JSON error body */

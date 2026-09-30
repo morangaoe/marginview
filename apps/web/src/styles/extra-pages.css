@@ -1,0 +1,51 @@
+/* Styles for the added pages. Map the --mv-* values to your tokens.css variables if you like. */
+:root {
+  --mv-fg: var(--text, #1c2024);
+  --mv-muted: var(--text-muted, #5b6470);
+  --mv-bg: var(--surface, #ffffff);
+  --mv-line: var(--border, #d9dee5);
+  --mv-accent: var(--accent, #1f6f5c);
+  --mv-danger: var(--danger, #a12a2a);
+}
+.mv-page { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; color: var(--mv-fg); }
+.mv-page h1 { font-size: 1.6rem; margin: 0 0 4px; }
+.mv-sub { color: var(--mv-muted); margin: 0 0 24px; max-width: 65ch; }
+.mv-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
+.mv-field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; flex: 1; }
+.mv-field label { font-size: .85rem; color: var(--mv-muted); }
+.mv-field input, .mv-field select, .mv-field textarea {
+  padding: 8px 10px; border: 1px solid var(--mv-line); border-radius: 6px; background: var(--mv-bg); color: var(--mv-fg); font: inherit;
+}
+.mv-btn {
+  padding: 8px 14px; border-radius: 6px; border: 1px solid var(--mv-accent); background: var(--mv-accent);
+  color: #fff; font: inherit; cursor: pointer;
+}
+.mv-btn.secondary { background: transparent; color: var(--mv-accent); }
+.mv-btn.danger { background: transparent; border-color: var(--mv-danger); color: var(--mv-danger); }
+.mv-btn:disabled { opacity: .5; cursor: not-allowed; }
+.mv-btn:focus-visible, .mv-field input:focus-visible, .mv-field select:focus-visible, .mv-field textarea:focus-visible {
+  outline: 2px solid var(--mv-accent); outline-offset: 2px;
+}
+.mv-table-wrap { overflow-x: auto; border: 1px solid var(--mv-line); border-radius: 8px; }
+.mv-table { width: 100%; border-collapse: collapse; }
+.mv-table th, .mv-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--mv-line); vertical-align: top; }
+.mv-table th { font-weight: 600; font-size: .85rem; color: var(--mv-muted); }
+.mv-badge { display: inline-block; padding: 2px 8px; border: 1px solid var(--mv-line); border-radius: 999px; font-size: .8rem; }
+.mv-badge.warn { border-color: var(--mv-danger); color: var(--mv-danger); }
+.mv-state { border: 1px dashed var(--mv-line); border-radius: 8px; padding: 24px; }
+.mv-state p { margin: 6px 0 12px; color: var(--mv-muted); }
+.mv-skel-stack { display: grid; gap: 10px; }
+.mv-skel { height: 44px; border-radius: 6px; background: linear-gradient(90deg, #e8ebef 25%, #f3f5f7 50%, #e8ebef 75%); background-size: 200% 100%; animation: mv-shimmer 1.4s infinite; }
+@keyframes mv-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .mv-skel { animation: none; } }
+.mv-fig { margin: 0 0 28px; }
+.mv-fig figcaption { font-weight: 600; margin-bottom: 8px; }
+.mv-fig svg { width: 100%; height: auto; max-width: 560px; }
+.mv-bar { fill: var(--mv-accent); }
+.mv-axis { font-size: 11px; fill: var(--mv-muted); }
+.mv-stat { font-size: 2rem; font-weight: 700; }
+.mv-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.mv-list li { border: 1px solid var(--mv-line); border-radius: 8px; padding: 12px; display: flex; justify-content: space-between; gap: 12px; }
+.mv-list li.unread { border-left: 4px solid var(--mv-accent); }
+.mv-error { color: var(--mv-danger); margin: 8px 0; }
+@media (max-width: 767px) { .mv-field { min-width: 100%; } }

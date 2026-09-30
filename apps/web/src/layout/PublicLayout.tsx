@@ -4,13 +4,17 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 export function PublicLayout() {
   const [solid, setSolid] = useState(false);
   const { pathname } = useLocation();
+
   useEffect(() => {
     const fn = () => setSolid(window.scrollY > 24);
     fn();
     window.addEventListener("scroll", fn, { passive: true });
     return () => window.removeEventListener("scroll", fn);
   }, []);
-  useEffect(() => window.scrollTo(0, 0), [pathname]);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
 
   return (
     <div style={{ minHeight: "100%", background: "#080808" }}>
@@ -23,6 +27,21 @@ export function PublicLayout() {
         </nav>
       </header>
       <Outlet />
+      <footer
+        style={{
+          display: "flex",
+          gap: 20,
+          flexWrap: "wrap",
+          justifyContent: "center",
+          padding: "32px 16px",
+          fontSize: 13,
+          color: "#9a9a9a",
+        }}
+      >
+        <Link to="/terms" className="txt">Terms</Link>
+        <Link to="/privacy" className="txt">Privacy</Link>
+        <Link to="/contact" className="txt">Contact</Link>
+      </footer>
     </div>
   );
 }

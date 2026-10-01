@@ -65,7 +65,14 @@ async function resolveLocationId(db: Db, orgId: string, requested?: string): Pro
     "SELECT id FROM locations WHERE organization_id = $1 ORDER BY name LIMIT 1",
     [orgId]
   );
-  return rows[0]?.id ?? null;
+  if (rows[0]) return rows[0].id;
+
+  // New organizations start with no locations; create a default instead of leaving the user stuck.
+  const created = await db.query(
+    "INSERT INTO locations (organization_id, name) VALUES ($1, 'Main Warehouse') RETURNING id",
+    [orgId]
+  );
+  return created.rows[0].id;
 }
 
 async function insertProduct(db: Db, orgId: string, locationId: string, p: ProductInput) {

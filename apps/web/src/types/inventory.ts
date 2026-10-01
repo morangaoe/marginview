@@ -118,10 +118,16 @@ export interface OptimizedPricingResponse {
 }
 
 // ---------------------------------------------------------------------------
-// API client (thin fetch wrapper; swap for your existing client if you have one)
+// API client
+//
+// Same conventions as src/api/client.ts and src/lib/useApi.ts:
+//  - API origin comes from VITE_API_URL (empty locally, so Vite's /api proxy is used)
+//  - auth is a Bearer token from localStorage ("mv_token"), not cookies
+// Callers pass full paths that include the "/api" prefix, e.g. "/api/products".
 // ---------------------------------------------------------------------------
 
-export const API_BASE: string = (import.meta as any).env?.VITE_API_URL ?? "";
+// Trailing slashes are stripped so "https://api.up.railway.app/" doesn't produce "//api/...".
+export const API_BASE: string = ((import.meta as any).env?.VITE_API_URL ?? "").replace(/\/+$/, "");
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) {
@@ -130,14 +136,47 @@ export class ApiError extends Error {
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
-  });
+  const token = localStorage.getItem("mv_token");
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch {
+    // fetch only throws on network/CORS failure ("Failed to fetch"), never on HTTP errors.
+    throw new ApiError(
+      0,
+      API_BASE
+        ? `Can't reach the server at ${API_BASE}. Check that it's running and that CORS allows this site.`
+        : "Can't reach the server. Make sure the API is running and VITE_API_URL is set for production."
+    );
+  }
+
   if (res.status === 204) return undefined as T;
+
   const body = await res.json().catch(() => undefined);
-  if (!res.ok) throw new ApiError(res.status, body?.error ?? `Request failed (${res.status})`, body);
+
+  if (!res.ok) {
+    const message =
+      typeof body?.error === "string" ? body.error : `Request failed (${res.status})`;
+    throw new ApiError(res.status, message, body);
+  }
+
+  // A 200 with a non-JSON body usually means the request hit the Vercel SPA rewrite
+  // (index.html) because VITE_API_URL isn't set. Fail loudly instead of returning undefined.
+  if (body === undefined) {
+    throw new ApiError(
+      res.status,
+      "Server returned a non-JSON response. If this is production, check that VITE_API_URL points to your API."
+    );
+  }
+
   return body as T;
 }
 

@@ -18,7 +18,7 @@ function average(nums: number[]): number | null {
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-function marginFor(priceCents: number, costCents: number): number {
+export function marginFor(priceCents: number, costCents: number): number {
   if (priceCents <= 0) return 0;
   return Math.round(((priceCents - costCents) / priceCents) * 100);
 }

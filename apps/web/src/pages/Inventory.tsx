@@ -10,6 +10,8 @@ import {
   type ProductDraft,
 } from "../types/inventory";
 import { CSVUploader } from "../components/CSVUploader";
+import CompetitorTargetsModal from "../components/inventory/CompetitorTargetsModal";
+import { saveCompetitorTargets, type CompetitorEntry } from "../components/inventory/CompetitorUrlInput";
 import { ProductFormModal, primaryButtonStyle, secondaryButtonStyle } from "../components/ProductFormModal";
 
 const BORDER = "var(--mv-border, rgba(255,255,255,0.12))";
@@ -39,6 +41,7 @@ export default function Inventory() {
   const [editing, setEditing] = useState<InventoryLevel | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tracking, setTracking] = useState<InventoryLevel | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -71,9 +74,22 @@ export default function Inventory() {
     );
   }, [levels, search, category, locationFilter]);
 
-  async function createProduct(draft: ProductDraft): Promise<string | null> {
+  // The create endpoint's response shape isn't relied on: look the new variant up by SKU.
+  async function attachCompetitors(sku: string, entries: CompetitorEntry[]) {
+    try {
+      const fresh = await apiJson<InventoryLevel[]>("/api/inventory/levels");
+      const match = fresh.find((l) => l.sku === sku);
+      if (!match) throw new Error("couldn't find the new product");
+      await saveCompetitorTargets(match.variant_id, entries);
+    } catch (e) {
+      setNotice(`Product saved, but competitor URLs weren't: ${(e as Error).message}. Use the Competitors button to retry.`);
+    }
+  }
+
+  async function createProduct(draft: ProductDraft, competitors: CompetitorEntry[] = []): Promise<string | null> {
     try {
       await apiJson("/api/products", { method: "POST", body: JSON.stringify(draft) });
+      if (competitors.length) await attachCompetitors(draft.sku, competitors);
       await load();
       return null;
     } catch (e) {
@@ -81,12 +97,13 @@ export default function Inventory() {
     }
   }
 
-  async function updateProduct(level: InventoryLevel, draft: ProductDraft): Promise<string | null> {
+  async function updateProduct(level: InventoryLevel, draft: ProductDraft, competitors: CompetitorEntry[] = []): Promise<string | null> {
     try {
       await apiJson(`/api/products/${level.variant_id}`, {
         method: "PATCH",
         body: JSON.stringify({ sku: draft.sku, name: draft.name, category: draft.category, cost_cents: draft.cost_cents }),
       });
+      if (competitors.length) await saveCompetitorTargets(level.variant_id, competitors);
       await load();
       return null;
     } catch (e) {
@@ -202,6 +219,7 @@ export default function Inventory() {
                         </>
                       ) : (
                         <>
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setTracking(l)}>Competitors</button>{" "}
                           <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setEditing(l)}>Edit</button>{" "}
                           <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setConfirmDelete(l.id)}>Delete</button>
                         </>
@@ -217,7 +235,10 @@ export default function Inventory() {
 
       {showAdd && <ProductFormModal mode="add" locations={locations} onClose={() => setShowAdd(false)} onSubmit={createProduct} />}
       {editing && (
-        <ProductFormModal mode="edit" initial={editing} locations={locations} onClose={() => setEditing(null)} onSubmit={(d) => updateProduct(editing, d)} />
+        <ProductFormModal mode="edit" initial={editing} locations={locations} onClose={() => setEditing(null)} onSubmit={(d, c) => updateProduct(editing, d, c)} />
+      )}
+      {tracking && (
+        <CompetitorTargetsModal variantId={tracking.variant_id} title={tracking.product_name} onClose={() => setTracking(null)} />
       )}
     </div>
   );

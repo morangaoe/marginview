@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { CATEGORIES, type InventoryLevel, type Location, type ProductDraft } from "../types/inventory";
 import { dollarsToCents } from "../utils/csvParser";
+import CompetitorUrlInput, { type CompetitorEntry } from "./inventory/CompetitorUrlInput";
+import "../styles/modules.css";
 
 // Dark-theme styling. Override --mv-* variables in your tokens.css to match the live palette.
 const C = {
@@ -40,7 +42,8 @@ interface Props {
   locations: Location[];
   onClose: () => void;
   /** Resolve with an error message to show inline, or null on success. */
-  onSubmit: (draft: ProductDraft) => Promise<string | null>;
+  /** Second argument carries any competitor URLs added in the form (existing callers can ignore it). */
+  onSubmit: (draft: ProductDraft, competitors: CompetitorEntry[]) => Promise<string | null>;
 }
 
 export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }: Props) {
@@ -54,6 +57,7 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [competitors, setCompetitors] = useState<CompetitorEntry[]>([]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -79,7 +83,7 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
       quantity: Number(quantity),
       reorder_level: Number(reorder),
       location_id: locationId || undefined,
-    });
+    }, competitors);
     setSaving(false);
     if (message) setFormError(message);
     else onClose();
@@ -163,6 +167,21 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
             )}
           </>
         )}
+
+        {/* Re-map the shared tokens so the competitor controls match this dark modal */}
+        <div
+          style={{
+            "--m-surface": C.surface, "--m-bg": C.field, "--m-border": C.border,
+            "--m-text": C.text, "--m-muted": C.muted, "--m-accent": C.accent, "--m-danger": C.danger,
+          } as React.CSSProperties}
+        >
+          <CompetitorUrlInput value={competitors} onChange={setCompetitors} searchHint={name} />
+          {mode === "edit" && (
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 6 }}>
+              New URLs are added here. To review, check or remove existing ones, use the Competitors button on the row.
+            </div>
+          )}
+        </div>
 
         {formError && <div role="alert" style={{ color: C.danger, fontSize: 13 }}>{formError}</div>}
 

@@ -1,6 +1,8 @@
 import { SkeletonRows } from "../components/Skeleton";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import OrgBillingOverview from "../components/billing/OrgBillingOverview";
+import "../styles/modules.css";
 
 interface PlanUsage {
   planName: string;
@@ -88,6 +90,9 @@ export function Billing() {
           <p style={{ fontSize: 13, color: "var(--slate)", margin: 0 }}>Well within your plan's included volume.</p>
         )}
       </div>
+
+      <h2 style={{ fontSize: 18, margin: "28px 0 12px" }}>Scraping credits and plans</h2>
+      <OrgBillingOverview />
     </div>
   );
 }

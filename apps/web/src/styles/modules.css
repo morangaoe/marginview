@@ -1,0 +1,29 @@
+:root{
+  --m-surface:var(--card,#fff);--m-border:var(--hairline,#e3e5ea);--m-text:var(--ink,#101828);
+  --m-muted:var(--slate,#667085);--m-accent:var(--accent,#2563eb);--m-danger:var(--critical,#b42318);--m-bg:var(--paper,#f8f9fb);
+}
+.mv-card{background:var(--m-surface);border:1px solid var(--m-border);border-radius:var(--radius,10px);padding:20px;color:var(--m-text)}
+.mv-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.mv-muted{color:var(--m-muted);font-size:.875rem}
+.mv-bar{height:10px;border-radius:99px;background:var(--m-border);overflow:hidden}
+.mv-bar>span{display:block;height:100%;background:var(--m-accent)}
+.mv-bar.warn>span{background:var(--warning,#d97706)}.mv-bar.bad>span{background:var(--m-danger)}
+.mv-btn{border:1px solid var(--m-border);background:var(--m-surface);color:var(--m-text);border-radius:8px;padding:7px 12px;cursor:pointer;font:inherit}
+.mv-btn:hover:not(:disabled){border-color:var(--m-accent)}
+.mv-btn:disabled{opacity:.55;cursor:not-allowed}
+.mv-btn.primary{background:var(--m-accent);border-color:var(--m-accent);color:#fff}
+.mv-input{width:100%;padding:8px 10px;border:1px solid var(--m-border);border-radius:6px;font:inherit;background:var(--m-bg);color:var(--m-text)}
+.mv-err{color:var(--m-danger);font-size:.875rem}
+.mv-table{width:100%;border-collapse:collapse;color:var(--m-text)}
+.mv-table th,.mv-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--m-border);vertical-align:middle}
+.mv-table-wrap{overflow-x:auto}
+.mv-badge{display:inline-block;padding:3px 9px;border-radius:99px;font-size:.78rem;font-weight:600;white-space:nowrap}
+.mv-badge.RESTOCK_NOW{background:#fee4e2;color:#b42318}
+.mv-badge.OPPORTUNITY_BUY{background:#dcfae6;color:#067647}
+.mv-badge.HOLD{background:#eaecf0;color:#344054}
+.mv-badge.LIQUIDATE{background:#fef0c7;color:#b54708}
+.mv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mv-radio{display:flex;gap:10px;padding:12px;border:1px solid var(--m-border);border-radius:8px;cursor:pointer;color:var(--m-text)}
+.mv-radio.on{border-color:var(--m-accent)}
+.mv-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+.mv-modal{background:var(--m-surface);color:var(--m-text);border:1px solid var(--m-border);border-radius:12px;width:100%;max-width:640px;max-height:90vh;overflow:auto;padding:24px;display:grid;gap:16px}

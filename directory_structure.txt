@@ -1,0 +1,104 @@
+.
+├── README.md
+├── apps
+│   ├── api
+│   │   ├── package-lock.json
+│   │   ├── package.json
+│   │   ├── src
+│   │   │   ├── components
+│   │   │   ├── db
+│   │   │   │   ├── pool.ts
+│   │   │   │   └── schema.sql
+│   │   │   ├── index.ts
+│   │   │   ├── middleware
+│   │   │   │   └── auth.ts
+│   │   │   ├── routes
+│   │   │   │   ├── admin.ts
+│   │   │   │   ├── assistant.ts
+│   │   │   │   ├── auth.ts
+│   │   │   │   ├── billing.ts
+│   │   │   │   ├── inventory.ts
+│   │   │   │   ├── pricing.ts
+│   │   │   │   ├── procurement.ts
+│   │   │   │   ├── products.ts
+│   │   │   │   ├── scraping.ts
+│   │   │   │   └── suppliers.ts
+│   │   │   ├── services
+│   │   │   │   ├── billing.test.ts
+│   │   │   │   ├── billing.ts
+│   │   │   │   ├── pricingStrategies.test.ts
+│   │   │   │   ├── pricingStrategies.ts
+│   │   │   │   ├── procurementSuggestions.ts
+│   │   │   │   └── scraping
+│   │   │   │       ├── complianceCheck.ts
+│   │   │   │       ├── extractPrice.test.ts
+│   │   │   │       ├── extractPrice.ts
+│   │   │   │       ├── runScrapingCycle.ts
+│   │   │   │       ├── scheduler.ts
+│   │   │   │       ├── validateSnapshot.test.ts
+│   │   │   │       └── validateSnapshot.ts
+│   │   │   └── types
+│   │   │       └── index.ts
+│   │   └── tsconfig.json
+│   └── web
+│       ├── apply-app-pages.sh
+│       ├── directory_structure.txt
+│       ├── index.html
+│       ├── package-lock.json
+│       ├── package.json
+│       ├── public
+│       ├── src
+│       │   ├── App.tsx
+│       │   ├── api
+│       │   │   └── client.ts
+│       │   ├── auth
+│       │   │   ├── AuthContext.tsx
+│       │   │   ├── ProtectedRoute.tsx
+│       │   │   └── jwt.ts
+│       │   ├── components
+│       │   │   ├── AiAssistant.tsx
+│       │   │   ├── Skeleton.tsx
+│       │   │   ├── StateView.tsx
+│       │   │   └── StatusPill.tsx
+│       │   ├── layout
+│       │   │   ├── AppShell.tsx
+│       │   │   └── PublicLayout.tsx
+│       │   ├── lib
+│       │   │   └── useApi.ts
+│       │   ├── main.tsx
+│       │   ├── pages
+│       │   │   ├── Admin.tsx
+│       │   │   ├── Billing.tsx
+│       │   │   ├── CompetitorSources.tsx
+│       │   │   ├── Contact.tsx
+│       │   │   ├── Dashboard.tsx
+│       │   │   ├── Demo.tsx
+│       │   │   ├── Home.tsx
+│       │   │   ├── Inventory.tsx
+│       │   │   ├── Login.tsx
+│       │   │   ├── Notifications.tsx
+│       │   │   ├── Onboarding.tsx
+│       │   │   ├── PriceHistory.tsx
+│       │   │   ├── Pricing.tsx
+│       │   │   ├── PricingList.tsx
+│       │   │   ├── Privacy.tsx
+│       │   │   ├── Procurement.tsx
+│       │   │   ├── PurchaseOrders.tsx
+│       │   │   ├── Reports.tsx
+│       │   │   ├── Settings.tsx
+│       │   │   ├── SignUp.tsx
+│       │   │   ├── SkuDetail.tsx
+│       │   │   ├── Suppliers.tsx
+│       │   │   └── Terms.tsx
+│       │   ├── styles
+│       │   │   ├── extra-pages.css
+│       │   │   ├── layout.css
+│       │   │   └── tokens.css
+│       │   └── vite-env.d.ts
+│       ├── tsconfig.json
+│       ├── tsconfig.tsbuildinfo
+│       ├── vercel.json
+│       └── vite.config.ts
+└── directory_structure.txt
+
+21 directories, 81 files

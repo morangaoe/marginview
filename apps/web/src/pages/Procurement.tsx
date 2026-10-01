@@ -1,6 +1,9 @@
 import { SkeletonRows } from "../components/Skeleton";
 import { CSSProperties, FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
+import ProcurementSummaryCards, { type Summary } from "../components/procurement/ProcurementSummaryCards";
+import ProcurementAdvisorTable, { type AdvisorRow } from "../components/procurement/ProcurementAdvisorTable";
+import "../styles/modules.css";
 
 interface Suggestion {
   id: string;
@@ -12,6 +15,7 @@ interface Suggestion {
   suggested_quantity: number;
   reason: { daysOfCover: number | null; belowReorderPoint: boolean; leadTimeDays: number };
   status: string;
+  unit_cost_cents?: number; // set for advisor rows; DB suggestions don't carry a cost
 }
 
 interface Supplier {
@@ -49,14 +53,14 @@ function PoModal({ suggestion, suppliers, locations, onClose, onCreated }: PoMod
     setCreating(true);
     try {
       await api.post<{ purchaseOrderId: string }>("/procurement/purchase-orders", {
-        suggestionId: suggestion.id,
+        suggestionId: suggestion.id || undefined, // advisor rows have no DB suggestion
         supplierId,
         locationId,
         items: [
           {
             productVariantId: suggestion.product_variant_id,
             quantityOrdered: quantity,
-            unitCostCents: 0, // unit cost unknown without a price list; set to 0, edit on the PO
+            unitCostCents: suggestion.unit_cost_cents ?? 0, // 0 when unknown; edit on the PO
           },
         ],
       });
@@ -127,7 +131,7 @@ function PoModal({ suggestion, suppliers, locations, onClose, onCreated }: PoMod
               required
             />
             <div style={{ fontSize: 11, color: "var(--slate)", marginTop: 4 }}>
-              Suggested: {suggestion.suggested_quantity} · Lead time: {suggestion.reason.leadTimeDays}d
+              Suggested: {suggestion.suggested_quantity}{suggestion.reason.leadTimeDays ? ` · Lead time: ${suggestion.reason.leadTimeDays}d` : ""}
             </div>
           </div>
 
@@ -152,6 +156,31 @@ export function Procurement() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [modal, setModal] = useState<Suggestion | null>(null);
+  const [advisor, setAdvisor] = useState<{ items: AdvisorRow[]; summary: Summary } | null>(null);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
+
+  function loadAdvisor() {
+    api
+      .get<{ items: AdvisorRow[]; summary: Summary }>("/procurement/recommendations")
+      .then((d) => { setAdvisor(d); setAdvisorError(null); })
+      .catch(() => setAdvisorError("Could not load market recommendations."));
+  }
+
+  // An advisor row opens the same PO modal as a reorder alert, pre-filled with the unit cost.
+  function openAdvisorPo(r: AdvisorRow) {
+    setModal({
+      id: "",
+      product_variant_id: r.variantId,
+      sku: r.sku,
+      name: r.name,
+      location_name: "",
+      location_id: "",
+      suggested_quantity: r.suggestedQty,
+      unit_cost_cents: r.costCents,
+      reason: { daysOfCover: r.daysOfCover == null ? null : Math.round(r.daysOfCover), belowReorderPoint: r.tag === "RESTOCK_NOW", leadTimeDays: 0 },
+      status: "open",
+    });
+  }
 
   function load() {
     api
@@ -162,6 +191,7 @@ export function Procurement() {
 
   useEffect(() => {
     load();
+    loadAdvisor();
     api.get<Supplier[]>("/suppliers").then(setSuppliers).catch(() => {});
     api.get<Location[]>("/admin/locations").then(setLocations).catch(() => {});
   }, []);
@@ -170,6 +200,7 @@ export function Procurement() {
     setSuccess("Purchase order created as draft.");
     setTimeout(() => setSuccess(null), 3000);
     load();
+    loadAdvisor();
   }
 
   return (
@@ -202,6 +233,21 @@ export function Procurement() {
         </div>
       )}
 
+      <h2 style={{ fontSize: 17, margin: "20px 0 10px" }}>Market advisor</h2>
+      {advisorError && (
+        <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
+          {advisorError}
+        </div>
+      )}
+      {advisor === null && !advisorError && <SkeletonRows rows={3} />}
+      {advisor && (
+        <div style={{ display: "grid", gap: 12, marginBottom: 8 }}>
+          <ProcurementSummaryCards summary={advisor.summary} />
+          <ProcurementAdvisorTable rows={advisor.items} onCreatePo={openAdvisorPo} />
+        </div>
+      )}
+
+      <h2 style={{ fontSize: 17, margin: "24px 0 10px" }}>Reorder alerts</h2>
       <div className="card">
         {!error && rows === null && <SkeletonRows rows={5} />}
         {rows?.length === 0 && <p style={{ color: "var(--slate)" }}>No open suggestions right now.</p>}

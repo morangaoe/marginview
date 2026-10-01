@@ -2,12 +2,15 @@ import { CSSProperties, FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import WorkspaceChoice, { type WorkspaceValue } from "../components/billing/WorkspaceChoice";
+import "../styles/modules.css";
 
 export function SignUp() {
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const [orgName, setOrgName] = useState("");
+  const [ws, setWs] = useState<WorkspaceValue>({ mode: "create", orgName: "", inviteCode: "" });
+  const [notice, setNotice] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -24,17 +27,23 @@ export function SignUp() {
     setError(null);
     setLoading(true);
     try {
-      const { token } = await api.post<{ token: string }>("/auth/signup", {
-        organizationName: orgName,
+      const res = await api.post<{ token?: string; pending?: boolean; message?: string }>("/onboarding/register", {
         fullName,
         email,
         password,
-        tosAccepted: true,
+        acceptTos: true,
+        mode: ws.mode,
+        orgName: ws.orgName,
+        inviteCode: ws.inviteCode,
       });
-      login(token);
+      if (res.pending) {
+        setNotice(res.message ?? "Request sent. A workspace owner needs to approve your access.");
+        return;
+      }
+      login(res.token!);
       navigate("/app", { replace: true });
     } catch (err: any) {
-      setError(err.message ?? "Sign up failed. Please try again.");
+      setError(cleanMessage(err.message));
     } finally {
       setLoading(false);
     }
@@ -53,18 +62,11 @@ export function SignUp() {
         </div>
 
         {error && <div style={errorBannerStyle}>{error}</div>}
+        {notice && <div role="status" style={noticeStyle}>{notice}</div>}
 
         <form onSubmit={handleSubmit}>
           <div style={fieldStyle}>
-            <label style={labelStyle}>Company / organization name</label>
-            <input
-              type="text"
-              required
-              value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
-              style={inputStyle}
-              placeholder="Acme Retail Inc."
-            />
+            <WorkspaceChoice value={ws} onChange={setWs} />
           </div>
 
           <div style={fieldStyle}>
@@ -197,3 +199,25 @@ const errorBannerStyle: CSSProperties = {
   fontSize: 13,
   marginBottom: 16,
 };
+
+const noticeStyle: CSSProperties = {
+  background: "var(--card)",
+  color: "var(--ink)",
+  border: "1px solid var(--accent)",
+  borderRadius: 6,
+  padding: "10px 12px",
+  fontSize: 13,
+  marginBottom: 16,
+};
+
+// api/client.ts stringifies error bodies, so a plain message arrives wrapped in quotes.
+function cleanMessage(m?: string): string {
+  if (!m) return "Sign up failed. Please try again.";
+  try {
+    const v = JSON.parse(m);
+    if (typeof v === "string") return v;
+  } catch {
+    /* not JSON, use as-is */
+  }
+  return m;
+}

@@ -2,9 +2,15 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool, query } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
+import { getRecommendations } from "../services/procurementAdvisor";
 
 export const procurementRouter = Router();
 procurementRouter.use(requireAuth);
+
+// NEW: stock + sales speed + competitor prices -> RESTOCK / OPPORTUNITY / HOLD / LIQUIDATE
+procurementRouter.get("/recommendations", async (req, res) => {
+  res.json(await getRecommendations(req.user!.organizationId));
+});
 
 procurementRouter.get("/suggestions", async (req, res) => {
   const rows = await query(
@@ -43,6 +49,21 @@ procurementRouter.post("/purchase-orders", async (req, res) => {
   const parsed = createPoSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { suggestionId, supplierId, locationId, items } = parsed.data;
+  const orgId = req.user!.organizationId;
+
+  // Tenant check: supplier, location and every variant must belong to the caller's organization.
+  const variantIds = [...new Set(items.map((i) => i.productVariantId))];
+  const [chk] = await query<{ s: number; l: number; v: number }>(
+    `select
+       (select count(*) from suppliers where id = $1 and organization_id = $3)::int as s,
+       (select count(*) from locations where id = $2 and organization_id = $3)::int as l,
+       (select count(*) from product_variants pv join products p on p.id = pv.product_id
+         where pv.id = any($4::uuid[]) and p.organization_id = $3)::int as v`,
+    [supplierId, locationId, orgId, variantIds]
+  );
+  if (!chk || chk.s !== 1 || chk.l !== 1 || chk.v !== variantIds.length) {
+    return res.status(404).json({ error: "Supplier, location or product not found." });
+  }
 
   const client = await pool.connect();
   try {
@@ -50,7 +71,7 @@ procurementRouter.post("/purchase-orders", async (req, res) => {
     const [po] = (await client.query(
       `insert into purchase_orders (organization_id, supplier_id, location_id, created_by_user_id)
        values ($1, $2, $3, $4) returning id`,
-      [req.user!.organizationId, supplierId, locationId, req.user!.id]
+      [orgId, supplierId, locationId, req.user!.id]
     )).rows;
 
     for (const item of items) {
@@ -62,7 +83,12 @@ procurementRouter.post("/purchase-orders", async (req, res) => {
     }
 
     if (suggestionId) {
-      await client.query(`update procurement_suggestions set status = 'actioned' where id = $1`, [suggestionId]);
+      await client.query(
+        `update procurement_suggestions s set status = 'actioned'
+           from product_variants v join products p on p.id = v.product_id
+          where s.id = $1 and v.id = s.product_variant_id and p.organization_id = $2`,
+        [suggestionId, orgId]
+      );
     }
 
     await client.query("COMMIT");
@@ -82,9 +108,10 @@ const statusSchema = z.object({
 procurementRouter.patch("/purchase-orders/:id/status", async (req, res) => {
   const parsed = statusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  await query(`update purchase_orders set status = $1, updated_at = now() where id = $2`, [
-    parsed.data.status,
-    req.params.id,
-  ]);
+  const r = await pool.query(
+    `update purchase_orders set status = $1, updated_at = now() where id = $2 and organization_id = $3`,
+    [parsed.data.status, req.params.id, req.user!.organizationId]
+  );
+  if (!r.rowCount) return res.status(404).json({ error: "Purchase order not found." });
   res.status(204).send();
 });

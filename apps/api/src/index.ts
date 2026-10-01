@@ -15,6 +15,12 @@ import productsRouter from "./routes/products";
 import { scrapingRouter } from "./routes/scraping";
 import { suppliersRouter } from "./routes/suppliers";
 import { startScrapingScheduler } from "./services/scraping/scheduler";
+import onboardingRouter from "./routes/onboarding";
+import searchRouter from "./routes/search";
+import competitorsRouter from "./routes/competitors";
+import scraperRouter from "./routes/scraper";
+import { startScrapeWorker } from "./queues/scrapeQueue";
+import { HttpError } from "./utils/http";
 
 const app = express();
 
@@ -45,11 +51,15 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Public
 app.use("/api/auth", authRouter);
+app.use("/api/onboarding", onboardingRouter); // create-or-join workspace signup
 
 // Protected: these three routers read req.user, so requireAuth must run first.
 app.use("/api/products", requireAuth, productsRouter);
 app.use("/api/inventory", requireAuth, inventoryRouter);
 app.use("/api/pricing", requireAuth, pricingRouter);
+app.use("/api/search", requireAuth, searchRouter);
+app.use("/api/competitors", requireAuth, competitorsRouter);
+app.use("/api/scraper", requireAuth, scraperRouter);
 
 // These apply requireAuth inside the router themselves.
 app.use("/api/procurement", procurementRouter);
@@ -66,6 +76,9 @@ app.use("/api", (req, res) => {
 
 // Centralized error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message });
+  }
   if (err?.type === "entity.too.large" || err?.status === 413) {
     return res.status(413).json({ error: "Request is too large. Try uploading fewer rows at a time." });
   }
@@ -76,18 +89,25 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ error: "Something went wrong on our end. Please try again." });
 });
 
+let scrapeWorker: ReturnType<typeof startScrapeWorker> = null;
+
 const port = Number(process.env.PORT) || 4000;
 const server = app.listen(port, () => {
   console.log(`Marginview API listening on port ${port}`);
   console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   // Start the Phase 2 scraping scheduler after the server is up
   startScrapingScheduler(pool);
+  // BullMQ worker for on-demand scrapes; returns null (and stays off) when REDIS_URL is unset
+  scrapeWorker = startScrapeWorker();
 });
 
 // Railway sends SIGTERM on redeploy; close cleanly so in-flight requests finish.
 const shutdown = () => {
   server.close(() => {
-    pool.end().finally(() => process.exit(0));
+    Promise.resolve(scrapeWorker?.close())
+      .catch(() => undefined)
+      .then(() => pool.end())
+      .finally(() => process.exit(0));
   });
 };
 process.on("SIGTERM", shutdown);

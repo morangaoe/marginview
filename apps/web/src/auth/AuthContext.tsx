@@ -1,4 +1,12 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { decodeJwt, isExpired, JwtPayload } from "./jwt";
 
 interface AuthState {
@@ -15,37 +23,79 @@ const AuthContext = createContext<AuthState>({
   logout: () => {},
 });
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => {
-    const stored = localStorage.getItem("mv_token");
+const TOKEN_KEY = "mv_token";
+
+function loadToken(): string | null {
+  try {
+    const stored = localStorage.getItem(TOKEN_KEY);
     if (!stored) return null;
     const payload = decodeJwt(stored);
+    // FIX: if the stored token is already expired on page load, clear it
+    // immediately instead of letting a 401 cascade through every API call.
     if (!payload || isExpired(payload)) {
-      localStorage.removeItem("mv_token");
+      localStorage.removeItem(TOKEN_KEY);
       return null;
     }
     return stored;
-  });
+  } catch {
+    // localStorage may be unavailable in private/sandboxed contexts
+    return null;
+  }
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [token, setToken] = useState<string | null>(loadToken);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const user = token ? decodeJwt(token) : null;
 
-  const login = useCallback((newToken: string) => {
-    localStorage.setItem("mv_token", newToken);
-    setToken(newToken);
-  }, []);
-
   const logout = useCallback(() => {
-    localStorage.removeItem("mv_token");
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      /* ignore */
+    }
     setToken(null);
   }, []);
 
-  // Auto-logout when token expires
+  const login = useCallback((newToken: string) => {
+    // FIX: validate the incoming token before storing it to avoid persisting
+    // a malformed JWT that would cause a silent redirect loop.
+    const payload = decodeJwt(newToken);
+    if (!payload) {
+      console.error("[auth] login() received an undecodable token — ignoring");
+      return;
+    }
+    if (isExpired(payload)) {
+      console.error("[auth] login() received an already-expired token — ignoring");
+      return;
+    }
+    try {
+      localStorage.setItem(TOKEN_KEY, newToken);
+    } catch {
+      /* ignore storage errors in sandboxed environments */
+    }
+    setToken(newToken);
+  }, []);
+
+  // Auto-logout timer: fires when the token hits its expiry time.
   useEffect(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     if (!user?.exp) return;
+
     const msLeft = user.exp * 1000 - Date.now();
-    if (msLeft <= 0) { logout(); return; }
-    const timer = setTimeout(logout, msLeft);
-    return () => clearTimeout(timer);
+    if (msLeft <= 0) {
+      // Already expired (race between load and effect)
+      logout();
+      return;
+    }
+    timerRef.current = setTimeout(logout, msLeft);
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
   }, [user?.exp, logout]);
 
   return (

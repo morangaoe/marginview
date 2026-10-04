@@ -1,0 +1,1671 @@
+
+
+===== .gitignore =====
+# Dependencies
+node_modules/
+**/node_modules/
+.pnpm-store/
+
+# Build & Production Outputs
+dist/
+build/
+.next/
+out/
+
+# Environment Variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs & Diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# System & OS Files
+.DS_Store
+Thumbs.db
+
+# IDE & Editor Settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+
+# Turbo / Cache
+.turbo/
+.cache/
+node_modules
+dist
+.env
+*.tsbuildinfo
+
+
+===== apps/api/package.json =====
+{
+  "name": "@marginview/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.1.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "ioredis": "^5.3.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5",
+    "playwright-core": "^1.42.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.12.12",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
+
+
+===== apps/api/tsconfig.json =====
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": false
+  },
+  "include": ["src"]
+}
+
+
+===== apps/api/.env.example =====
+DATABASE_URL=postgres://localhost:5432/marginview
+JWT_SECRET=change-me-in-production
+PORT=4000
+FRONTEND_URL=http://localhost:5173,http://localhost:5174
+
+===== apps/api/src/index.ts =====
+import "express-async-errors";
+import cors from "cors";
+import "dotenv/config";
+import express from "express";
+import { pool } from "./db/pool";
+import { requireAuth } from "./middleware/auth";
+import { adminRouter } from "./routes/admin";
+import { assistantRouter } from "./routes/assistant";
+import { authRouter } from "./routes/auth";
+import { billingRouter } from "./routes/billing";
+import inventoryRouter from "./routes/inventory";
+import pricingRouter from "./routes/pricing";
+import { procurementRouter } from "./routes/procurement";
+import productsRouter from "./routes/products";
+import { scrapingRouter } from "./routes/scraping";
+import { suppliersRouter } from "./routes/suppliers";
+import { startScrapingScheduler } from "./services/scraping/scheduler";
+import onboardingRouter from "./routes/onboarding";
+import searchRouter from "./routes/search";
+import competitorsRouter from "./routes/competitors";
+import scraperRouter from "./routes/scraper";
+import { startScrapeWorker } from "./queues/scrapeQueue";
+import { HttpError } from "./utils/http";
+
+const app = express();
+
+// FRONTEND_URL should be set in production to your deployed frontend's
+// origin (e.g. https://marginview.vercel.app). Multiple origins can be
+// comma-separated. Falls back to common local dev ports when unset.
+// Trailing slashes are stripped because browsers send Origin without one,
+// and "https://app.vercel.app/" would never match.
+const allowedOrigins = (
+  process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174"
+)
+  .split(",")
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
+
+if (!process.env.JWT_SECRET) {
+  console.warn("[config] JWT_SECRET is not set. Falling back to an insecure dev secret.");
+}
+if (!process.env.DATABASE_URL) {
+  console.warn("[config] DATABASE_URL is not set. Database queries will fail.");
+}
+
+app.use(cors({ origin: allowedOrigins }));
+// Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.
+app.use(express.json({ limit: "5mb" }));
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Public
+app.use("/api/auth", authRouter);
+app.use("/api/onboarding", onboardingRouter); // create-or-join workspace signup
+
+// Protected: these three routers read req.user, so requireAuth must run first.
+app.use("/api/products", requireAuth, productsRouter);
+app.use("/api/inventory", requireAuth, inventoryRouter);
+app.use("/api/pricing", requireAuth, pricingRouter);
+app.use("/api/search", requireAuth, searchRouter);
+app.use("/api/competitors", requireAuth, competitorsRouter);
+app.use("/api/scraper", requireAuth, scraperRouter);
+
+// These apply requireAuth inside the router themselves.
+app.use("/api/procurement", procurementRouter);
+app.use("/api/assistant", assistantRouter);
+app.use("/api/billing", billingRouter);
+app.use("/api/scraping", scrapingRouter);
+app.use("/api/suppliers", suppliersRouter);
+app.use("/api/admin", adminRouter);
+
+// Unknown /api routes get JSON instead of Express's default HTML 404.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+// Centralized error handler
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message });
+  }
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({ error: "Request is too large. Try uploading fewer rows at a time." });
+  }
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "Invalid JSON in request body." });
+  }
+  console.error(err);
+  res.status(500).json({ error: "Something went wrong on our end. Please try again." });
+});
+
+let scrapeWorker: ReturnType<typeof startScrapeWorker> = null;
+
+const port = Number(process.env.PORT) || 4000;
+const server = app.listen(port, () => {
+  console.log(`Marginview API listening on port ${port}`);
+  console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
+  // Start the Phase 2 scraping scheduler after the server is up
+  startScrapingScheduler(pool);
+  // BullMQ worker for on-demand scrapes; returns null (and stays off) when REDIS_URL is unset
+  scrapeWorker = startScrapeWorker();
+});
+
+// Railway sends SIGTERM on redeploy; close cleanly so in-flight requests finish.
+const shutdown = () => {
+  server.close(() => {
+    Promise.resolve(scrapeWorker?.close())
+      .catch(() => undefined)
+      .then(() => pool.end())
+      .finally(() => process.exit(0));
+  });
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+
+===== apps/api/src/middleware/auth.ts =====
+import { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { AuthedUser } from "../types";
+
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing or malformed Authorization header" });
+  }
+  try {
+    const token = header.slice("Bearer ".length);
+    req.user = jwt.verify(token, JWT_SECRET) as AuthedUser;
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+
+/**
+ * Restrict a route to one or more roles. Enforced server-side, per TRD
+ * section 9, not left to the client to hide a button.
+ */
+export function requireRole(...roles: AuthedUser["role"][]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: "You do not have permission to do this" });
+    }
+    next();
+  };
+}
+
+export function signToken(user: AuthedUser): string {
+  return jwt.sign(user, JWT_SECRET, { expiresIn: "12h" });
+}
+
+
+===== apps/api/src/db/pool.ts =====
+import { Pool } from "pg";
+import "dotenv/config";
+
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+/** Thin query helper so routes don't import `pool` directly everywhere. */
+export async function query<T = any>(text: string, params?: any[]): Promise<T[]> {
+  const result = await pool.query(text, params);
+  return result.rows as T[];
+}
+
+
+===== apps/api/src/db/schema.sql =====
+-- Marginview database schema
+-- Matches /docs Backend Schema document. PostgreSQL 14+.
+
+create extension if not exists "uuid-ossp";
+
+-- ========== Identity & organization ==========
+
+create table organizations (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null,
+  default_currency char(3) not null default 'USD',
+  tos_accepted_at timestamptz,
+  privacy_policy_version_accepted text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table users (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  email text not null unique,
+  password_hash text not null,
+  full_name text not null,
+  status text not null default 'active' check (status in ('active','invited','disabled')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create table roles (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null unique check (name in ('owner','pricing_manager','inventory_manager','viewer'))
+);
+insert into roles (name) values ('owner'),('pricing_manager'),('inventory_manager'),('viewer');
+
+create table locations (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  name text not null,
+  address text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table user_roles (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references users(id),
+  role_id uuid not null references roles(id),
+  location_id uuid references locations(id)
+);
+-- Partial unique indexes replace the composite PK so NULL location_id
+-- (org-wide role) is handled correctly — a NULL in a PK is undefined
+-- behaviour in Postgres and silently breaks uniqueness enforcement.
+create unique index idx_user_roles_scoped  on user_roles (user_id, role_id, location_id) where location_id is not null;
+create unique index idx_user_roles_orgwide on user_roles (user_id, role_id)              where location_id is null;
+
+-- ========== Catalog & inventory ==========
+
+create table products (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  name text not null,
+  category text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create table product_variants (
+  id uuid primary key default uuid_generate_v4(),
+  product_id uuid not null references products(id),
+  sku text not null,
+  unit_cost_cents integer not null,
+  currency char(3) not null default 'USD',
+  current_price_cents integer,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+create unique index idx_variant_sku_per_product on product_variants (product_id, sku);
+
+create table inventory_levels (
+  id uuid primary key default uuid_generate_v4(),
+  product_variant_id uuid not null references product_variants(id),
+  location_id uuid not null references locations(id),
+  on_hand integer not null default 0,
+  committed integer not null default 0,
+  incoming integer not null default 0,
+  reorder_point integer not null default 0,
+  reorder_quantity integer not null default 0,
+  updated_at timestamptz not null default now(),
+  unique (product_variant_id, location_id)
+);
+
+create table inventory_movements (
+  id uuid primary key default uuid_generate_v4(),
+  inventory_level_id uuid not null references inventory_levels(id),
+  change_quantity integer not null,
+  reason_code text not null check (reason_code in ('received','sold','damaged','returned','recount')),
+  actor_user_id uuid not null references users(id),
+  note text,
+  created_at timestamptz not null default now()
+);
+
+-- ========== Pricing intelligence ==========
+
+create table scraping_sources (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  url text not null,
+  compliance_status text not null default 'unreviewed' check (compliance_status in ('automated_allowed','manual_only','unreviewed')),
+  scrape_interval_minutes integer not null default 720,
+  last_checked_at timestamptz,
+  last_status text not null default 'pending' check (last_status in ('ok','failed','pending')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table competitor_products (
+  id uuid primary key default uuid_generate_v4(),
+  product_variant_id uuid not null references product_variants(id),
+  scraping_source_id uuid references scraping_sources(id),
+  competitor_name text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table price_snapshots (
+  id uuid primary key default uuid_generate_v4(),
+  competitor_product_id uuid not null references competitor_products(id),
+  price_cents integer not null,
+  currency char(3) not null,
+  in_stock boolean,
+  observed_at timestamptz not null default now(),
+  source text not null check (source in ('scraped','manual')),
+  validation_flag text check (validation_flag in ('ok','out_of_band','low_confidence'))
+);
+create index idx_price_snapshots_latest on price_snapshots (competitor_product_id, observed_at desc);
+
+create table pricing_strategies (
+  id uuid primary key default uuid_generate_v4(),
+  product_variant_id uuid not null references product_variants(id),
+  strategy_type text not null check (strategy_type in ('cost_plus','value_based','dynamic','keystone','penetration','price_skimming')),
+  parameters jsonb not null default '{}',
+  active boolean not null default true,
+  created_by_user_id uuid not null references users(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table price_change_log (
+  id uuid primary key default uuid_generate_v4(),
+  product_variant_id uuid not null references product_variants(id),
+  pricing_strategy_id uuid references pricing_strategies(id),
+  old_price_cents integer,
+  new_price_cents integer not null,
+  actor_user_id uuid not null references users(id),
+  applied_at timestamptz not null default now()
+);
+
+-- ========== Suppliers & procurement ==========
+
+create table suppliers (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  name text not null,
+  contact_email text,
+  default_lead_time_days integer not null default 14,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table purchase_orders (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  supplier_id uuid not null references suppliers(id),
+  location_id uuid not null references locations(id),
+  status text not null default 'draft' check (status in ('draft','sent','partially_received','received','closed')),
+  created_by_user_id uuid not null references users(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table purchase_order_items (
+  id uuid primary key default uuid_generate_v4(),
+  purchase_order_id uuid not null references purchase_orders(id),
+  product_variant_id uuid not null references product_variants(id),
+  quantity_ordered integer not null,
+  quantity_received integer not null default 0,
+  unit_cost_cents integer not null
+);
+
+create table procurement_suggestions (
+  id uuid primary key default uuid_generate_v4(),
+  product_variant_id uuid not null references product_variants(id),
+  location_id uuid not null references locations(id),
+  suggested_quantity integer not null,
+  reason jsonb not null default '{}',
+  status text not null default 'open' check (status in ('open','actioned','dismissed')),
+  dismissed_reason text,
+  generated_at timestamptz not null default now()
+);
+
+-- ========== Scraping infra ==========
+
+create table scraping_job_runs (
+  id uuid primary key default uuid_generate_v4(),
+  scraping_source_id uuid not null references scraping_sources(id),
+  status text not null default 'queued' check (status in ('queued','running','succeeded','failed')),
+  failure_reason text,
+  started_at timestamptz,
+  finished_at timestamptz
+);
+
+-- ========== AI assistant ==========
+
+create table ai_conversations (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  user_id uuid not null references users(id),
+  product_variant_id uuid references product_variants(id),
+  created_at timestamptz not null default now()
+);
+
+create table ai_messages (
+  id uuid primary key default uuid_generate_v4(),
+  conversation_id uuid not null references ai_conversations(id),
+  role text not null check (role in ('user','assistant')),
+  content text not null,
+  referenced_records jsonb,
+  created_at timestamptz not null default now()
+);
+
+-- ========== Billing ==========
+
+create table plans (
+  id uuid primary key default uuid_generate_v4(),
+  name text not null,
+  pricing_model jsonb not null default '{}'
+);
+
+create table subscriptions (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  plan_id uuid not null references plans(id),
+  status text not null default 'trialing' check (status in ('trialing','active','past_due','canceled')),
+  -- Set the first time a tracked source successfully returns a price for
+  -- this org, not at signup, per the Pricing & Packaging Strategy section 7
+  -- ("trial clock does not start ticking until the first competitor source
+  -- successfully returns a price"). Null means the trial has not started yet.
+  trial_activated_at timestamptz,
+  current_period_end timestamptz
+);
+
+create table invoices (
+  id uuid primary key default uuid_generate_v4(),
+  subscription_id uuid not null references subscriptions(id),
+  amount_cents integer not null,
+  status text not null default 'open' check (status in ('open','paid','void')),
+  issued_at timestamptz not null default now()
+);
+
+-- ========== Platform ==========
+
+create table audit_logs (
+  id uuid primary key default uuid_generate_v4(),
+  organization_id uuid not null references organizations(id),
+  actor_user_id uuid not null references users(id),
+  action text not null,
+  entity_type text not null,
+  entity_id uuid not null,
+  before_state jsonb,
+  after_state jsonb,
+  created_at timestamptz not null default now()
+);
+
+-- ========== Seed data: plans ==========
+-- Matches the Pricing & Packaging Strategy document section 4. The value
+-- metric is tracked competitor sources per month, not seats; seats are
+-- unlimited on every tier since collaboration across roles is a stated
+-- product goal, not something to meter.
+insert into plans (name, pricing_model) values
+  ('Starter', '{"tracked_sources_included": 15, "sku_soft_limit": 200, "price_cents_monthly": 4900, "billing": "self_serve"}'),
+  ('Growth', '{"tracked_sources_included": 100, "sku_soft_limit": 2000, "price_cents_monthly": 19900, "billing": "self_serve"}'),
+  ('Scale', '{"tracked_sources_included": null, "sku_soft_limit": null, "price_cents_monthly": null, "starting_floor_cents_monthly": 49900, "billing": "sales_assisted"}');
+
+create table notifications (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references users(id),
+  type text not null,
+  payload jsonb not null default '{}',
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+
+===== apps/api/src/types/index.ts =====
+export type StrategyType =
+  | "cost_plus"
+  | "value_based"
+  | "dynamic"
+  | "keystone"
+  | "penetration"
+  | "price_skimming";
+
+export interface AuthedUser {
+  id: string;
+  organizationId: string;
+  role: "owner" | "pricing_manager" | "inventory_manager" | "viewer";
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthedUser;
+    }
+  }
+}
+
+
+===== apps/api/src/routes/auth.ts =====
+import bcrypt from "bcryptjs";
+import { Router } from "express";
+import { z } from "zod";
+import { pool } from "../db/pool";
+import { signToken } from "../middleware/auth";
+
+export const authRouter = Router();
+
+const signupSchema = z.object({
+  organizationName: z.string().min(1),
+  fullName: z.string().min(1),
+  email: z.string().email(),
+  password: z.string().min(8),
+  tosAccepted: z.literal(true), // App Flow 3.1: acceptance is required, not a pre-checked box
+});
+
+authRouter.post("/signup", async (req, res) => {
+  const parsed = signupSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { organizationName, fullName, email, password } = parsed.data;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const org = await client.query(
+      `insert into organizations (name, tos_accepted_at, privacy_policy_version_accepted)
+       values ($1, now(), 'v1') returning id`,
+      [organizationName]
+    );
+    const organizationId = org.rows[0].id;
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await client.query(
+      `insert into users (organization_id, email, password_hash, full_name)
+       values ($1, $2, $3, $4) returning id`,
+      [organizationId, email, passwordHash, fullName]
+    );
+
+    const ownerRole = await client.query(`select id from roles where name = 'owner'`);
+    await client.query(
+      `insert into user_roles (user_id, role_id) values ($1, $2)`,
+      [user.rows[0].id, ownerRole.rows[0].id]
+    );
+
+    // Every org starts trialing on Starter (per Pricing & Packaging Strategy
+    // section 3): full features, no charge yet, trial clock starts later
+    // when the first scrape succeeds (see services/billing.ts).
+    const starterPlan = await client.query(`select id from plans where name = 'Starter'`);
+    await client.query(
+      `insert into subscriptions (organization_id, plan_id, status) values ($1, $2, 'trialing')`,
+      [organizationId, starterPlan.rows[0].id]
+    );
+
+    await client.query("COMMIT");
+
+    const token = signToken({ id: user.rows[0].id, organizationId, role: "owner" });
+    res.status(201).json({ token });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if ((err as any).code === "23505") {
+      return res.status(409).json({ error: "An account with that email already exists" });
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+const loginSchema = z.object({ email: z.string().email(), password: z.string() });
+
+authRouter.post("/login", async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { email, password } = parsed.data;
+
+  const rows = await pool.query(
+    `select u.id, u.organization_id, u.password_hash, r.name as role
+     from users u
+     join user_roles ur on ur.user_id = u.id
+     join roles r on r.id = ur.role_id
+     where u.email = $1 and u.deleted_at is null
+     limit 1`,
+    [email]
+  );
+  const user = rows.rows[0];
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    return res.status(401).json({ error: "Incorrect email or password" });
+  }
+
+  const token = signToken({ id: user.id, organizationId: user.organization_id, role: user.role });
+  res.json({ token });
+});
+
+
+===== apps/api/src/routes/pricing.ts =====
+import { Router, type Request, type Response } from "express";
+import { pool } from "../db/pool";
+import { computeStrategy, marginFor } from "../services/pricingStrategies";
+
+const router = Router();
+
+// Adjust to however your auth middleware attaches the user.
+const orgIdOf = (req: Request): string | undefined => {
+  const u = (req as any).user;
+  return u?.organization_id ?? u?.org_id ?? u?.organizationId;
+};
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+const STRATEGIES = ["cost_plus", "value_based", "keystone", "dynamic"] as const;
+type Strategy = (typeof STRATEGIES)[number];
+
+interface Baseline {
+  price_cents: number;
+  margin_percent: number;
+  warning: string | null;
+}
+
+const VARIANT_SQL = `
+  SELECT v.id, v.unit_cost_cents AS cost_cents, v.current_price_cents
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+   WHERE v.id = $1 AND p.organization_id = $2
+     AND v.deleted_at IS NULL AND p.deleted_at IS NULL
+`;
+
+// Latest tracked price per competitor product for this variant.
+const COMPETITOR_SQL = `
+  SELECT DISTINCT ON (cp.id) ps.price_cents
+    FROM competitor_products cp
+    JOIN price_snapshots ps ON ps.competitor_product_id = cp.id
+   WHERE cp.product_variant_id = $1
+     AND (ps.validation_flag IS NULL OR ps.validation_flag = 'ok')
+   ORDER BY cp.id, ps.observed_at DESC
+`;
+
+/**
+ * POST /api/pricing/:variantId/optimized
+ * Body: {
+ *   weights: { cost_plus, value_based, keystone, dynamic },
+ *   target_margin_pct?, markup_percent?, value_based_cents?, dynamic_cents?
+ * }
+ */
+router.post("/:variantId/optimized", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+  const { weights, target_margin_pct, markup_percent, value_based_cents, dynamic_cents } = req.body ?? {};
+  if (!weights || typeof weights !== "object") {
+    return res.status(400).json({ error: "weights is required" });
+  }
+
+  const w: Record<Strategy, number> = { cost_plus: 0, value_based: 0, keystone: 0, dynamic: 0 };
+  for (const name of STRATEGIES) {
+    const val = weights[name];
+    if (!isNum(val) || val < 0) {
+      return res.status(400).json({ error: `weights.${name} must be a non-negative number` });
+    }
+    w[name] = val;
+  }
+
+  const optionalNumbers: [string, unknown][] = [
+    ["target_margin_pct", target_margin_pct],
+    ["markup_percent", markup_percent],
+    ["value_based_cents", value_based_cents],
+    ["dynamic_cents", dynamic_cents],
+  ];
+  for (const [label, val] of optionalNumbers) {
+    if (val !== undefined && (!isNum(val) || val < 0)) {
+      return res.status(400).json({ error: `${label} must be a non-negative number` });
+    }
+  }
+
+  // A markup of m% on cost equals a margin of m / (100 + m) on price.
+  const targetMarginPct: number =
+    target_margin_pct ?? (markup_percent !== undefined ? (markup_percent / (100 + markup_percent)) * 100 : 40);
+
+  try {
+    const variant = await pool.query(VARIANT_SQL, [req.params.variantId, orgId]);
+    if (variant.rows.length === 0) return res.status(404).json({ error: "Variant not found" });
+
+    const costCents = Number(variant.rows[0].cost_cents);
+    const currentPriceCents: number | null =
+      variant.rows[0].current_price_cents === null ? null : Number(variant.rows[0].current_price_cents);
+
+    const comp = await pool.query(COMPETITOR_SQL, [req.params.variantId]);
+    const competitorPricesCents: number[] = comp.rows.map((r: any) => Number(r.price_cents));
+
+    const base = { unitCostCents: costCents, competitorPricesCents, currentPriceCents };
+
+    const parametersFor: Record<Strategy, Record<string, number>> = {
+      cost_plus: { targetMarginPct },
+      value_based: { perceivedValueCents: value_based_cents ?? Math.round(costCents * 2.6) },
+      keystone: {},
+      dynamic:
+        dynamic_cents !== undefined
+          ? { floorCents: Math.round(dynamic_cents), ceilingCents: Math.round(dynamic_cents) }
+          : {},
+    };
+
+    const total = STRATEGIES.reduce((sum, n) => sum + w[n], 0);
+    const normalized: Record<Strategy, number> = { cost_plus: 0, value_based: 0, keystone: 0, dynamic: 0 };
+    for (const n of STRATEGIES) normalized[n] = total > 0 ? (w[n] / total) * 100 : 25;
+
+    const baselines = {} as Record<Strategy, Baseline>;
+    let blended = 0;
+    for (const n of STRATEGIES) {
+      const r = computeStrategy(n, { ...base, parameters: parametersFor[n] });
+      const price = r.recommendedPriceCents;
+      baselines[n] = { price_cents: price, margin_percent: marginFor(price, costCents), warning: r.warning ?? null };
+      blended += price * (normalized[n] / 100);
+    }
+    const optimized = Math.round(blended);
+
+    return res.json({
+      variant_id: variant.rows[0].id,
+      cost_cents: costCents,
+      weights_input: w,
+      weights_normalized: normalized,
+      weights_balanced: Math.abs(total - 100) < 0.01,
+      baselines,
+      optimized_price_cents: optimized,
+      margin_percent: marginFor(optimized, costCents),
+    });
+  } catch (err) {
+    console.error("POST /pricing/:variantId/optimized failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+export default router;
+
+
+===== apps/api/src/routes/scraping.ts =====
+/**
+ * Scraping routes:
+ *  POST /api/scraping/sources          — register a URL to track
+ *  GET  /api/scraping/sources          — list sources with their status & latest price
+ *  PATCH /api/scraping/sources/:id     — update selector or interval
+ *  POST /api/scraping/sources/:id/run  — manually trigger a single-source run
+ *  POST /api/scraping/run-now          — manually trigger the full cycle (owner only)
+ *  GET  /api/scraping/sources/:id/snapshots — price history for one source
+ */
+
+import { Router } from "express";
+import { z } from "zod";
+import { pool, query } from "../db/pool";
+import { requireAuth, requireRole } from "../middleware/auth";
+import { checkCompliance } from "../services/scraping/complianceCheck";
+import { extractPrice } from "../services/scraping/extractPrice";
+import { runScrapingCycle } from "../services/scraping/runScrapingCycle";
+import { validateSnapshot } from "../services/scraping/validateSnapshot";
+
+export const scrapingRouter = Router();
+scrapingRouter.use(requireAuth);
+
+const registerSchema = z.object({
+  url: z.string().url(),
+  competitorName: z.string().min(1),
+  productVariantId: z.string().uuid(),
+  priceSelector: z.string().optional(),
+  scrapeIntervalMinutes: z.number().int().min(60).max(10_080).default(720), // 1h – 7d
+});
+
+// Register a new competitor URL to track
+scrapingRouter.post("/sources", requireRole("owner", "pricing_manager"), async (req, res) => {
+  const parsed = registerSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { url, competitorName, productVariantId, priceSelector, scrapeIntervalMinutes } = parsed.data;
+
+  // Compliance check runs synchronously so the caller knows immediately
+  // whether automated scraping is permitted for this URL
+  const complianceStatus = await checkCompliance(url);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const [source] = (await client.query(
+      `insert into scraping_sources
+         (organization_id, url, compliance_status, scrape_interval_minutes)
+       values ($1, $2, $3, $4) returning id`,
+      [req.user!.organizationId, url, complianceStatus, scrapeIntervalMinutes]
+    )).rows;
+
+    const [cp] = (await client.query(
+      `insert into competitor_products
+         (product_variant_id, scraping_source_id, competitor_name, price_selector)
+       values ($1, $2, $3, $4) returning id`,
+      [productVariantId, source.id, competitorName, priceSelector ?? null]
+    )).rows;
+
+    await client.query("COMMIT");
+
+    res.status(201).json({
+      sourceId: source.id,
+      competitorProductId: cp.id,
+      complianceStatus,
+      message:
+        complianceStatus === "automated_allowed"
+          ? "Source registered. Automated scraping will begin within the next cycle."
+          : "Source registered as manual-only. robots.txt disallows automated access; enter prices by hand.",
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+// List all tracked sources for this org with their current status
+scrapingRouter.get("/sources", async (req, res) => {
+  const rows = await query(
+    `select
+       ss.id,
+       ss.url,
+       ss.compliance_status,
+       ss.scrape_interval_minutes,
+       ss.last_checked_at,
+       ss.last_status,
+       cp.id as competitor_product_id,
+       cp.competitor_name,
+       cp.price_selector,
+       v.sku,
+       p.name as product_name,
+       snap.price_cents as latest_price_cents,
+       snap.currency as latest_currency,
+       snap.observed_at as latest_observed_at,
+       snap.validation_flag
+     from scraping_sources ss
+     join competitor_products cp on cp.scraping_source_id = ss.id
+     join product_variants v on v.id = cp.product_variant_id
+     join products p on p.id = v.product_id
+     left join lateral (
+       select price_cents, currency, observed_at, validation_flag
+       from price_snapshots
+       where competitor_product_id = cp.id
+       order by observed_at desc limit 1
+     ) snap on true
+     where ss.organization_id = $1
+     order by ss.created_at desc`,
+    [req.user!.organizationId]
+  );
+  res.json(rows);
+});
+
+// Update selector or interval for a source
+const updateSchema = z.object({
+  priceSelector: z.string().optional(),
+  scrapeIntervalMinutes: z.number().int().min(60).max(10_080).optional(),
+});
+
+scrapingRouter.patch("/sources/:id", requireRole("owner", "pricing_manager"), async (req, res) => {
+  const parsed = updateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { priceSelector, scrapeIntervalMinutes } = parsed.data;
+
+  if (priceSelector !== undefined) {
+    await query(
+      `update competitor_products set price_selector = $1, updated_at = now()
+       where scraping_source_id = $2`,
+      [priceSelector || null, req.params.id]
+    );
+  }
+
+  if (scrapeIntervalMinutes !== undefined) {
+    await query(
+      `update scraping_sources set scrape_interval_minutes = $1, updated_at = now() where id = $2`,
+      [scrapeIntervalMinutes, req.params.id]
+    );
+  }
+
+  res.status(204).send();
+});
+
+// Price history for a single source
+scrapingRouter.get("/sources/:id/snapshots", async (req, res) => {
+  const rows = await query(
+    `select ps.price_cents, ps.currency, ps.in_stock, ps.observed_at, ps.source, ps.validation_flag
+     from price_snapshots ps
+     join competitor_products cp on cp.id = ps.competitor_product_id
+     join scraping_sources ss on ss.id = cp.scraping_source_id
+     where ss.id = $1 and ss.organization_id = $2
+     order by ps.observed_at desc
+     limit 200`,
+    [req.params.id, req.user!.organizationId]
+  );
+  res.json(rows);
+});
+
+// Manual run for a single source (useful for testing a new selector)
+scrapingRouter.post(
+  "/sources/:id/run",
+  requireRole("owner", "pricing_manager"),
+  async (req, res) => {
+    const [source] = await query(
+      `select ss.url, cp.id as competitor_product_id, cp.price_selector,
+              ps_latest.price_cents as last_price_cents, coalesce(ps_latest.currency, 'USD') as currency
+       from scraping_sources ss
+       join competitor_products cp on cp.scraping_source_id = ss.id
+       left join lateral (
+         select price_cents, currency from price_snapshots
+         where competitor_product_id = cp.id order by observed_at desc limit 1
+       ) ps_latest on true
+       where ss.id = $1 and ss.organization_id = $2`,
+      [req.params.id, req.user!.organizationId]
+    );
+
+    if (!source) return res.status(404).json({ error: "Source not found" });
+
+    try {
+      const extracted = await extractPrice(source.url, source.price_selector);
+      const flag = validateSnapshot(extracted, source.last_price_cents);
+
+      let snapshotId: string | null = null;
+      if (extracted.priceCents !== null) {
+        const [snap] = await query(
+          `insert into price_snapshots
+             (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
+           values ($1, $2, $3, $4, 'scraped', $5) returning id`,
+          [
+            source.competitor_product_id,
+            extracted.priceCents,
+            extracted.currency || source.currency,
+            extracted.inStock,
+            flag,
+          ]
+        );
+        snapshotId = snap.id;
+
+        await query(
+          `update scraping_sources set last_checked_at = now(), last_status = 'ok' where id = $1`,
+          [req.params.id]
+        );
+      } else {
+        await query(
+          `update scraping_sources set last_checked_at = now(), last_status = 'failed' where id = $1`,
+          [req.params.id]
+        );
+      }
+
+      res.json({ extracted, validationFlag: flag, snapshotId });
+    } catch (err: any) {
+      res.status(502).json({ error: err?.message ?? "Extraction failed" });
+    }
+  }
+);
+
+// Trigger the full cycle manually (owner only, for testing/catch-up)
+scrapingRouter.post("/run-now", requireRole("owner"), async (req, res) => {
+  const cycleResult = await runScrapingCycle(pool);
+  res.json(cycleResult);
+});
+
+// Manual price entry (for manual_only sources)
+const manualEntrySchema = z.object({
+  competitorProductId: z.string().uuid(),
+  priceCents: z.number().int().positive(),
+  currency: z.string().length(3).default("USD"),
+  inStock: z.boolean().optional(),
+});
+
+scrapingRouter.post("/manual-entry", requireRole("owner", "pricing_manager"), async (req, res) => {
+  const parsed = manualEntrySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { competitorProductId, priceCents, currency, inStock } = parsed.data;
+
+  const [snap] = await query(
+    `insert into price_snapshots
+       (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
+     values ($1, $2, $3, $4, 'manual', 'ok') returning id`,
+    [competitorProductId, priceCents, currency, inStock ?? null]
+  );
+
+  res.status(201).json({ snapshotId: snap.id });
+});
+
+
+===== apps/api/src/routes/products.ts =====
+import { Router, type Request, type Response } from "express";
+import type { PoolClient } from "pg";
+import { pool } from "../db/pool";
+
+const router = Router();
+
+// Adjust to however your auth middleware attaches the user.
+const orgIdOf = (req: Request): string | undefined => {
+  const u = (req as any).user;
+  return u?.organization_id ?? u?.org_id ?? u?.organizationId;
+};
+
+const MAX_BULK_ROWS = 2000;
+type Db = Pick<PoolClient, "query">;
+
+interface ProductInput {
+  sku: string;
+  name: string;
+  category: string;
+  cost_cents: number;
+  quantity: number;
+  reorder_level: number;
+}
+
+const isWholeNonNeg = (v: unknown): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+function validateProduct(p: any): string[] {
+  const errs: string[] = [];
+  if (typeof p?.sku !== "string" || !p.sku.trim()) errs.push("sku is required");
+  if (typeof p?.name !== "string" || !p.name.trim()) errs.push("name is required");
+  if (typeof p?.category !== "string" || !p.category.trim()) errs.push("category is required");
+  if (!isWholeNonNeg(p?.cost_cents) || p.cost_cents <= 0) errs.push("cost_cents must be a positive integer (cents)");
+  if (!isWholeNonNeg(p?.quantity)) errs.push("quantity must be a non-negative integer");
+  if (!isWholeNonNeg(p?.reorder_level)) errs.push("reorder_level must be a non-negative integer");
+  return errs;
+}
+
+const SKU_CHECK_SQL = `
+  SELECT v.sku
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+   WHERE p.organization_id = $1
+     AND v.sku = ANY($2::text[])
+     AND v.deleted_at IS NULL AND p.deleted_at IS NULL
+     AND ($3::uuid IS NULL OR v.id <> $3::uuid)
+`;
+
+/** Org-wide SKU check across live variants (the DB only enforces uniqueness per product). */
+async function findExistingSkus(db: Db, orgId: string, skus: string[], excludeVariantId?: string): Promise<Set<string>> {
+  if (skus.length === 0) return new Set<string>();
+  const { rows } = await db.query(SKU_CHECK_SQL, [orgId, skus, excludeVariantId ?? null]);
+  return new Set<string>(rows.map((r: any) => r.sku as string));
+}
+
+async function resolveLocationId(db: Db, orgId: string, requested?: string): Promise<string | null> {
+  if (requested) {
+    const { rows } = await db.query(
+      "SELECT id FROM locations WHERE id = $1 AND organization_id = $2",
+      [requested, orgId]
+    );
+    return rows[0]?.id ?? null;
+  }
+  const { rows } = await db.query(
+    "SELECT id FROM locations WHERE organization_id = $1 ORDER BY name LIMIT 1",
+    [orgId]
+  );
+  if (rows[0]) return rows[0].id;
+
+  // New organizations start with no locations; create a default instead of leaving the user stuck.
+  const created = await db.query(
+    "INSERT INTO locations (organization_id, name) VALUES ($1, 'Main Warehouse') RETURNING id",
+    [orgId]
+  );
+  return created.rows[0].id;
+}
+
+async function insertProduct(db: Db, orgId: string, locationId: string, p: ProductInput) {
+  const prod = await db.query(
+    "INSERT INTO products (organization_id, name, category) VALUES ($1, $2, $3) RETURNING id",
+    [orgId, p.name.trim(), p.category.trim()]
+  );
+  const variant = await db.query(
+    "INSERT INTO product_variants (product_id, sku, unit_cost_cents) VALUES ($1, $2, $3) RETURNING id",
+    [prod.rows[0].id, p.sku.trim(), p.cost_cents]
+  );
+  const level = await db.query(
+    "INSERT INTO inventory_levels (product_variant_id, location_id, on_hand, reorder_point) VALUES ($1, $2, $3, $4) RETURNING id",
+    [variant.rows[0].id, locationId, p.quantity, p.reorder_level]
+  );
+  return { product_id: prod.rows[0].id, variant_id: variant.rows[0].id, level_id: level.rows[0].id };
+}
+
+const LIST_SQL = `
+  SELECT v.id AS variant_id, p.id AS product_id, v.sku, p.name, p.category,
+         v.unit_cost_cents AS cost_cents
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+   WHERE p.organization_id = $1 AND v.deleted_at IS NULL AND p.deleted_at IS NULL
+   ORDER BY p.name, v.sku
+`;
+
+const FIND_VARIANT_SQL = `
+  SELECT v.id, v.product_id
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+   WHERE v.id = $1 AND p.organization_id = $2
+     AND v.deleted_at IS NULL AND p.deleted_at IS NULL
+   FOR UPDATE OF v
+`;
+
+/** GET /api/products */
+router.get("/", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const { rows } = await pool.query(LIST_SQL, [orgId]);
+    return res.json(rows.map((r: any) => ({ ...r, cost_cents: Number(r.cost_cents) })));
+  } catch (err) {
+    console.error("GET /products failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** POST /api/products  body: ProductInput & { location_id? } */
+router.post("/", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+  const errs = validateProduct(req.body);
+  if (errs.length) return res.status(400).json({ error: errs.join("; ") });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const dupes = await findExistingSkus(client, orgId, [req.body.sku.trim()]);
+    if (dupes.size) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: `SKU "${req.body.sku.trim()}" already exists` });
+    }
+    const locationId = await resolveLocationId(client, orgId, req.body.location_id);
+    if (!locationId) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "No valid location found; create a location first" });
+    }
+    const ids = await insertProduct(client, orgId, locationId, req.body);
+    await client.query("COMMIT");
+    return res.status(201).json(ids);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("POST /products failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+/** POST /api/products/bulk  body: { items: ProductInput[], location_id? }. All-or-nothing. */
+router.post("/bulk", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+  const items: unknown = req.body?.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "items must be a non-empty array" });
+  }
+  if (items.length > MAX_BULK_ROWS) {
+    return res.status(413).json({ error: `Too many rows (max ${MAX_BULK_ROWS})` });
+  }
+
+  const rowErrors: { row: number; sku?: string; errors: string[] }[] = [];
+  const seen = new Map<string, number>();
+  items.forEach((item: any, i: number) => {
+    const errors = validateProduct(item);
+    const sku = typeof item?.sku === "string" ? item.sku.trim() : "";
+    if (sku) {
+      if (seen.has(sku)) errors.push(`duplicate SKU in payload (also row ${seen.get(sku)! + 1})`);
+      else seen.set(sku, i);
+    }
+    if (errors.length) rowErrors.push({ row: i + 1, sku: sku || undefined, errors });
+  });
+  if (rowErrors.length) return res.status(422).json({ error: "Validation failed", rows: rowErrors });
+
+  const list = items as ProductInput[];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const existing = await findExistingSkus(client, orgId, list.map((p) => p.sku.trim()));
+    if (existing.size) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Some SKUs already exist",
+        rows: list
+          .map((p, i) => ({ row: i + 1, sku: p.sku.trim(), errors: ["SKU already exists"] }))
+          .filter((r) => existing.has(r.sku)),
+      });
+    }
+
+    const locationId = await resolveLocationId(client, orgId, req.body?.location_id);
+    if (!locationId) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "No valid location found; create a location first" });
+    }
+
+    for (const p of list) await insertProduct(client, orgId, locationId, p);
+    await client.query("COMMIT");
+    return res.status(201).json({ created: list.length, location_id: locationId });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("POST /products/bulk failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+/** PATCH /api/products/:variantId  body: { sku?, name?, category?, cost_cents? } */
+router.patch("/:variantId", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+  const { sku, name, category, cost_cents } = req.body ?? {};
+  if (sku === undefined && name === undefined && category === undefined && cost_cents === undefined) {
+    return res.status(400).json({ error: "Nothing to update" });
+  }
+  if (sku !== undefined && (typeof sku !== "string" || !sku.trim())) {
+    return res.status(400).json({ error: "sku must be a non-empty string" });
+  }
+  if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+    return res.status(400).json({ error: "name must be a non-empty string" });
+  }
+  if (category !== undefined && (typeof category !== "string" || !category.trim())) {
+    return res.status(400).json({ error: "category must be a non-empty string" });
+  }
+  if (cost_cents !== undefined && (!isWholeNonNeg(cost_cents) || cost_cents <= 0)) {
+    return res.status(400).json({ error: "cost_cents must be a positive integer" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const found = await client.query(FIND_VARIANT_SQL, [req.params.variantId, orgId]);
+    if (found.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Product not found" });
+    }
+    if (sku !== undefined) {
+      const dupes = await findExistingSkus(client, orgId, [sku.trim()], req.params.variantId);
+      if (dupes.size) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: `SKU "${sku.trim()}" already exists` });
+      }
+    }
+    await client.query(
+      "UPDATE product_variants SET sku = COALESCE($2, sku), unit_cost_cents = COALESCE($3, unit_cost_cents), updated_at = now() WHERE id = $1",
+      [req.params.variantId, sku?.trim() ?? null, cost_cents ?? null]
+    );
+    if (name !== undefined || category !== undefined) {
+      await client.query(
+        "UPDATE products SET name = COALESCE($2, name), category = COALESCE($3, category), updated_at = now() WHERE id = $1",
+        [found.rows[0].product_id, name?.trim() ?? null, category?.trim() ?? null]
+      );
+    }
+    await client.query("COMMIT");
+    return res.json({ variant_id: req.params.variantId, product_id: found.rows[0].product_id });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("PATCH /products/:variantId failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+/** DELETE /api/products/:variantId: soft delete the variant (and its product if no live variants remain). */
+router.delete("/:variantId", async (req: Request, res: Response) => {
+  const orgId = orgIdOf(req);
+  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const found = await client.query(FIND_VARIANT_SQL, [req.params.variantId, orgId]);
+    if (found.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Product not found" });
+    }
+    const productId = found.rows[0].product_id;
+    await client.query(
+      "UPDATE product_variants SET deleted_at = now(), updated_at = now() WHERE id = $1",
+      [req.params.variantId]
+    );
+    await client.query(
+      "UPDATE products SET deleted_at = now(), updated_at = now() WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM product_variants WHERE product_id = $1 AND deleted_at IS NULL)",
+      [productId]
+    );
+    await client.query("COMMIT");
+    return res.status(204).send();
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("DELETE /products/:variantId failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+export default router;
+
+
+===== apps/api/src/services/pricingStrategies.ts =====
+import { StrategyType } from "../types";
+
+export interface StrategyInput {
+  unitCostCents: number;
+  competitorPricesCents: number[]; // latest known price per tracked competitor
+  currentPriceCents: number | null;
+  parameters: Record<string, number>;
+}
+
+export interface StrategyResult {
+  recommendedPriceCents: number;
+  marginPct: number; // resulting margin, as a percentage of price
+  warning: string | null;
+}
+
+function average(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+export function marginFor(priceCents: number, costCents: number): number {
+  if (priceCents <= 0) return 0;
+  return Math.round(((priceCents - costCents) / priceCents) * 100);
+}
+
+function warnIfUnprofitable(priceCents: number, costCents: number): string | null {
+  if (priceCents <= costCents) {
+    return "This price results in zero or negative margin. Review before applying.";
+  }
+  return null;
+}
+
+/**
+ * Computes a recommended price for one of the six strategies described in
+ * PRD section 7.1. Every branch returns a margin and a warning so the
+ * caller can show both before the user confirms (error prevention:
+ * nothing here applies a price on its own).
+ */
+export function computeStrategy(type: StrategyType, input: StrategyInput): StrategyResult {
+  const { unitCostCents, competitorPricesCents, parameters } = input;
+  const competitorAvg = average(competitorPricesCents);
+
+  switch (type) {
+    case "cost_plus": {
+      const targetMarginPct = parameters.targetMarginPct ?? 40;
+      const price = Math.round(unitCostCents * (1 + targetMarginPct / 100));
+      return { recommendedPriceCents: price, marginPct: marginFor(price, unitCostCents), warning: warnIfUnprofitable(price, unitCostCents) };
+    }
+
+    case "keystone": {
+      const price = unitCostCents * 2;
+      return { recommendedPriceCents: price, marginPct: marginFor(price, unitCostCents), warning: null };
+    }
+
+    case "value_based": {
+      // parameters.perceivedValueCents is a user-entered willingness-to-pay input,
+      // deliberately decoupled from cost.
+      const price = Math.round(parameters.perceivedValueCents ?? unitCostCents * 2.2);
+      return { recommendedPriceCents: price, marginPct: marginFor(price, unitCostCents), warning: warnIfUnprofitable(price, unitCostCents) };
+    }
+
+    case "dynamic": {
+      const floor = parameters.floorCents ?? unitCostCents * 1.1;
+      const ceiling = parameters.ceilingCents ?? unitCostCents * 2.5;
+      let price = competitorAvg ?? floor;
+      price = Math.max(floor, Math.min(ceiling, price));
+      return {
+        recommendedPriceCents: Math.round(price),
+        marginPct: marginFor(price, unitCostCents),
+        warning: competitorAvg === null ? "No competitor prices tracked yet; using the floor price." : warnIfUnprofitable(price, unitCostCents),
+      };
+    }
+
+    case "penetration": {
+      const belowPct = parameters.belowCompetitorPct ?? 15;
+      if (competitorAvg === null) {
+        return { recommendedPriceCents: unitCostCents, marginPct: 0, warning: "No tracked competitors; cannot compute a penetration price yet." };
+      }
+      const price = Math.round(competitorAvg * (1 - belowPct / 100));
+      return { recommendedPriceCents: price, marginPct: marginFor(price, unitCostCents), warning: warnIfUnprofitable(price, unitCostCents) };
+    }
+
+    case "price_skimming": {
+      const abovePct = parameters.abovePct ?? 25;
+      const base = competitorAvg ?? unitCostCents * 2;
+      const price = Math.round(base * (1 + abovePct / 100));
+      return { recommendedPriceCents: price, marginPct: marginFor(price, unitCostCents), warning: null };
+    }
+  }
+}
+
+export const DEFAULT_PARAMETERS: Record<StrategyType, Record<string, number>> = {
+  cost_plus: { targetMarginPct: 40 },
+  value_based: {},
+  dynamic: {},
+  keystone: {},
+  penetration: { belowCompetitorPct: 15 },
+  price_skimming: { abovePct: 25 },
+};
+
+
+===== apps/api/src/services/scraping/runScrapingCycle.ts =====
+/**
+ * Core scraping cycle: finds every source that is due for a check, runs the
+ * extractor, validates the result, and writes a price snapshot. Designed to
+ * be called on a timer (see scheduler.ts) or manually via the API route.
+ *
+ * Each source runs in its own try/catch so one failure never aborts the rest.
+ */
+
+import { Pool } from "pg";
+import { extractPrice } from "./extractPrice";
+import { validateSnapshot } from "./validateSnapshot";
+
+interface DueSource {
+  id: string;
+  url: string;
+  compliance_status: "automated_allowed" | "manual_only" | "unreviewed";
+  competitor_product_id: string;
+  price_selector: string | null;
+  last_price_cents: number | null;
+  currency: string;
+}
+
+export interface CycleResult {
+  sourcesChecked: number;
+  snapshotsWritten: number;
+  failures: { sourceId: string; reason: string }[];
+}
+
+export async function runScrapingCycle(pool: Pool): Promise<CycleResult> {
+  const result: CycleResult = { sourcesChecked: 0, snapshotsWritten: 0, failures: [] };
+
+  // Find sources that are due: automated_allowed and past their interval
+  const { rows: sources } = await pool.query<DueSource>(`
+    select
+      ss.id,
+      ss.url,
+      ss.compliance_status,
+      cp.id as competitor_product_id,
+      cp.price_selector,
+      ps_latest.price_cents as last_price_cents,
+      coalesce(ps_latest.currency, 'USD') as currency
+    from scraping_sources ss
+    join competitor_products cp on cp.scraping_source_id = ss.id
+    left join lateral (
+      select price_cents, currency
+      from price_snapshots
+      where competitor_product_id = cp.id
+      order by observed_at desc
+      limit 1
+    ) ps_latest on true
+    where ss.compliance_status = 'automated_allowed'
+      and (
+        ss.last_checked_at is null
+        or ss.last_checked_at < now() - (ss.scrape_interval_minutes * interval '1 minute')
+      )
+    for update of ss skip locked
+  `);
+
+  for (const source of sources) {
+    result.sourcesChecked++;
+    const jobRow = await pool.query(
+      `insert into scraping_job_runs (scraping_source_id, status, started_at)
+       values ($1, 'running', now()) returning id`,
+      [source.id]
+    );
+    const jobId: string = jobRow.rows[0].id;
+
+    try {
+      const extracted = await extractPrice(source.url, source.price_selector);
+
+      if (extracted.priceCents === null) {
+        throw new Error(`Extractor returned no price (confidence: ${extracted.confidence})`);
+      }
+
+      const flag = validateSnapshot(extracted, source.last_price_cents);
+
+      await pool.query(
+        `insert into price_snapshots
+           (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
+         values ($1, $2, $3, $4, 'scraped', $5)`,
+        [
+          source.competitor_product_id,
+          extracted.priceCents,
+          extracted.currency || source.currency,
+          extracted.inStock,
+          flag,
+        ]
+      );
+
+      await pool.query(
+        `update scraping_sources
+         set last_checked_at = now(), last_status = 'ok', updated_at = now()
+         where id = $1`,
+        [source.id]
+      );
+
+      await pool.query(
+        `update scraping_job_runs
+         set status = 'succeeded', finished_at = now()
+         where id = $1`,
+        [jobId]
+      );
+
+      result.snapshotsWritten++;
+    } catch (err: any) {
+      const reason = err?.message ?? "Unknown error";
+      result.failures.push({ sourceId: source.id, reason });
+
+      await pool.query(
+        `update scraping_sources
+         set last_checked_at = now(), last_status = 'failed', updated_at = now()
+         where id = $1`,
+        [source.id]
+      );
+
+      await pool.query(
+        `update scraping_job_runs
+         set status = 'failed', failure_reason = $1, finished_at = now()
+         where id = $2`,
+        [reason, jobId]
+      );
+    }
+  }
+
+  return result;
+}
+
+
+===== apps/api/src/services/scraping/scheduler.ts =====
+/**
+ * Scheduler: kicks off runScrapingCycle on a fixed interval.
+ *
+ * Default: every 5 minutes. Sources with longer intervals just get skipped
+ * by the query inside runScrapingCycle until they're actually due.
+ *
+ * The interval handle is returned so tests or graceful-shutdown code can
+ * call clearInterval on it.
+ */
+
+import { Pool } from "pg";
+import { runScrapingCycle } from "./runScrapingCycle";
+
+const POLL_INTERVAL_MS = 5 * 60 * 1_000; // 5 minutes
+
+export function startScrapingScheduler(pool: Pool): ReturnType<typeof setInterval> {
+  console.log(`[scraper] Scheduler started — polling every ${POLL_INTERVAL_MS / 60_000} min`);
+
+  const handle = setInterval(async () => {
+    try {
+      const result = await runScrapingCycle(pool);
+      if (result.sourcesChecked > 0) {
+        console.log(
+          `[scraper] Cycle complete: ${result.snapshotsWritten}/${result.sourcesChecked} written, ` +
+          `${result.failures.length} failed`
+        );
+        for (const f of result.failures) {
+          console.warn(`[scraper] Source ${f.sourceId} failed: ${f.reason}`);
+        }
+      }
+    } catch (err) {
+      console.error("[scraper] Unhandled cycle error:", err);
+    }
+  }, POLL_INTERVAL_MS);
+
+  return handle;
+}
+
+
+===== apps/api/src/services/scraping/extractPrice.ts =====
+/**
+ * Price extractor: fetches a competito

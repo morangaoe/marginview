@@ -1,0 +1,2688 @@
+=== MARGINVIEW CONTEXT DUMP 2 ===
+Generated: Sun Oct  4 17:35:01 EAT 2026
+
+=== apps/api/package.json ===
+{
+  "name": "@marginview/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.1.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "ioredis": "^5.3.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5",
+    "playwright-core": "^1.42.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.12.12",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
+
+
+=== apps/api/src/index.ts ===
+import "express-async-errors";
+import cors from "cors";
+import "dotenv/config";
+import express from "express";
+import { pool } from "./db/pool";
+import { requireAuth } from "./middleware/auth";
+import { adminRouter } from "./routes/admin";
+import { assistantRouter } from "./routes/assistant";
+import { authRouter } from "./routes/auth";
+import { billingRouter } from "./routes/billing";
+import inventoryRouter from "./routes/inventory";
+import pricingRouter from "./routes/pricing";
+import { procurementRouter } from "./routes/procurement";
+import productsRouter from "./routes/products";
+import { scrapingRouter } from "./routes/scraping";
+import { suppliersRouter } from "./routes/suppliers";
+import { startScrapingScheduler } from "./services/scraping/scheduler";
+import onboardingRouter from "./routes/onboarding";
+import searchRouter from "./routes/search";
+import competitorsRouter from "./routes/competitors";
+import scraperRouter from "./routes/scraper";
+import { startScrapeWorker } from "./queues/scrapeQueue";
+import { HttpError } from "./utils/http";
+
+const app = express();
+
+// FRONTEND_URL should be set in production to your deployed frontend's
+// origin (e.g. https://marginview.vercel.app). Multiple origins can be
+// comma-separated. Falls back to common local dev ports when unset.
+// Trailing slashes are stripped because browsers send Origin without one,
+// and "https://app.vercel.app/" would never match.
+const allowedOrigins = (
+  process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174"
+)
+  .split(",")
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
+
+if (!process.env.JWT_SECRET) {
+  console.warn("[config] JWT_SECRET is not set. Falling back to an insecure dev secret.");
+}
+if (!process.env.DATABASE_URL) {
+  console.warn("[config] DATABASE_URL is not set. Database queries will fail.");
+}
+
+app.use(cors({ origin: allowedOrigins }));
+// Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.
+app.use(express.json({ limit: "5mb" }));
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Public
+app.use("/api/auth", authRouter);
+app.use("/api/onboarding", onboardingRouter); // create-or-join workspace signup
+
+// Protected: these three routers read req.user, so requireAuth must run first.
+app.use("/api/products", requireAuth, productsRouter);
+app.use("/api/inventory", requireAuth, inventoryRouter);
+app.use("/api/pricing", requireAuth, pricingRouter);
+app.use("/api/search", requireAuth, searchRouter);
+app.use("/api/competitors", requireAuth, competitorsRouter);
+app.use("/api/scraper", requireAuth, scraperRouter);
+
+// These apply requireAuth inside the router themselves.
+app.use("/api/procurement", procurementRouter);
+app.use("/api/assistant", assistantRouter);
+app.use("/api/billing", billingRouter);
+app.use("/api/scraping", scrapingRouter);
+app.use("/api/suppliers", suppliersRouter);
+app.use("/api/admin", adminRouter);
+
+// Unknown /api routes get JSON instead of Express's default HTML 404.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+// Centralized error handler
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message });
+  }
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({ error: "Request is too large. Try uploading fewer rows at a time." });
+  }
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "Invalid JSON in request body." });
+  }
+  console.error(err);
+  res.status(500).json({ error: "Something went wrong on our end. Please try again." });
+});
+
+let scrapeWorker: ReturnType<typeof startScrapeWorker> = null;
+
+const port = Number(process.env.PORT) || 4000;
+const server = app.listen(port, () => {
+  console.log(`Marginview API listening on port ${port}`);
+  console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
+  // Start the Phase 2 scraping scheduler after the server is up
+  startScrapingScheduler(pool);
+  // BullMQ worker for on-demand scrapes; returns null (and stays off) when REDIS_URL is unset
+  scrapeWorker = startScrapeWorker();
+});
+
+// Railway sends SIGTERM on redeploy; close cleanly so in-flight requests finish.
+const shutdown = () => {
+  server.close(() => {
+    Promise.resolve(scrapeWorker?.close())
+      .catch(() => undefined)
+      .then(() => pool.end())
+      .finally(() => process.exit(0));
+  });
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+
+=== apps/api/src/routes/procurement.ts ===
+import { Router } from "express";
+import { z } from "zod";
+import { pool, query } from "../db/pool";
+import { requireAuth } from "../middleware/auth";
+import { getRecommendations } from "../services/procurementAdvisor";
+
+export const procurementRouter = Router();
+procurementRouter.use(requireAuth);
+
+// NEW: stock + sales speed + competitor prices -> RESTOCK / OPPORTUNITY / HOLD / LIQUIDATE
+procurementRouter.get("/recommendations", async (req, res) => {
+  res.json(await getRecommendations(req.user!.organizationId));
+});
+
+procurementRouter.get("/suggestions", async (req, res) => {
+  const rows = await query(
+    `select s.id, s.suggested_quantity, s.reason, s.status,
+            v.id as product_variant_id, v.sku,
+            p.name,
+            l.id as location_id, l.name as location_name
+     from procurement_suggestions s
+     join product_variants v on v.id = s.product_variant_id
+     join products p on p.id = v.product_id
+     join locations l on l.id = s.location_id
+     where p.organization_id = $1 and s.status = 'open'
+     order by s.generated_at desc`,
+    [req.user!.organizationId]
+  );
+  res.json(rows);
+});
+
+const createPoSchema = z.object({
+  suggestionId: z.string().uuid().optional(),
+  supplierId: z.string().uuid(),
+  locationId: z.string().uuid(),
+  items: z.array(
+    z.object({
+      productVariantId: z.string().uuid(),
+      quantityOrdered: z.number().int().positive(),
+      unitCostCents: z.number().int().nonnegative(),
+    })
+  ).min(1),
+});
+
+// Creates a draft PO, pre-filled from a suggestion when one is provided,
+// per App Flow 3.3. Nothing here marks stock as incoming until the PO is
+// actually sent; that transition is a separate status update.
+procurementRouter.post("/purchase-orders", async (req, res) => {
+  const parsed = createPoSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { suggestionId, supplierId, locationId, items } = parsed.data;
+  const orgId = req.user!.organizationId;
+
+  // Tenant check: supplier, location and every variant must belong to the caller's organization.
+  const variantIds = [...new Set(items.map((i) => i.productVariantId))];
+  const [chk] = await query<{ s: number; l: number; v: number }>(
+    `select
+       (select count(*) from suppliers where id = $1 and organization_id = $3)::int as s,
+       (select count(*) from locations where id = $2 and organization_id = $3)::int as l,
+       (select count(*) from product_variants pv join products p on p.id = pv.product_id
+         where pv.id = any($4::uuid[]) and p.organization_id = $3)::int as v`,
+    [supplierId, locationId, orgId, variantIds]
+  );
+  if (!chk || chk.s !== 1 || chk.l !== 1 || chk.v !== variantIds.length) {
+    return res.status(404).json({ error: "Supplier, location or product not found." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const [po] = (await client.query(
+      `insert into purchase_orders (organization_id, supplier_id, location_id, created_by_user_id)
+       values ($1, $2, $3, $4) returning id`,
+      [orgId, supplierId, locationId, req.user!.id]
+    )).rows;
+
+    for (const item of items) {
+      await client.query(
+        `insert into purchase_order_items (purchase_order_id, product_variant_id, quantity_ordered, unit_cost_cents)
+         values ($1, $2, $3, $4)`,
+        [po.id, item.productVariantId, item.quantityOrdered, item.unitCostCents]
+      );
+    }
+
+    if (suggestionId) {
+      await client.query(
+        `update procurement_suggestions s set status = 'actioned'
+           from product_variants v join products p on p.id = v.product_id
+          where s.id = $1 and v.id = s.product_variant_id and p.organization_id = $2`,
+        [suggestionId, orgId]
+      );
+    }
+
+    await client.query("COMMIT");
+    res.status(201).json({ purchaseOrderId: po.id });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
+const statusSchema = z.object({
+  status: z.enum(["draft", "sent", "partially_received", "received", "closed"]),
+});
+
+procurementRouter.patch("/purchase-orders/:id/status", async (req, res) => {
+  const parsed = statusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const r = await pool.query(
+    `update purchase_orders set status = $1, updated_at = now() where id = $2 and organization_id = $3`,
+    [parsed.data.status, req.params.id, req.user!.organizationId]
+  );
+  if (!r.rowCount) return res.status(404).json({ error: "Purchase order not found." });
+  res.status(204).send();
+});
+
+
+=== apps/api/src/routes/billing.ts ===
+import { Router } from "express";
+import { requireAuth } from "../middleware/auth";
+import { getPlanUsage } from "../services/billing";
+import { getBillingOverview } from "../services/billingOverview";
+
+export const billingRouter = Router();
+billingRouter.use(requireAuth);
+
+billingRouter.get("/usage", async (req, res) => {
+  const usage = await getPlanUsage(req.user!.organizationId);
+  res.json(usage);
+});
+
+// NEW: org-level credits, invite code (owners only) and plan options
+billingRouter.get("/overview", async (req, res) => {
+  res.json(await getBillingOverview(req.user!.organizationId, req.user!.id));
+});
+
+
+=== apps/api/src/routes/competitors.ts ===
+import { Router } from "express";
+import { pool } from "../db/pool";
+import { HttpError, orgIdOf, wrap } from "../utils/http";
+
+const router = Router();
+
+async function assertVariantInOrg(variantId: string, orgId: string) {
+  const r = await pool.query(
+    `select 1 from product_variants pv join products p on p.id = pv.product_id
+      where pv.id = $1 and p.organization_id = $2 and pv.deleted_at is null`,
+    [variantId, orgId],
+  );
+  if (!r.rowCount) throw new HttpError(404, "Product not found.");
+}
+
+router.get(
+  "/",
+  wrap(async (req, res) => {
+    const orgId = orgIdOf(req);
+    const variantId = String(req.query.variantId ?? "");
+    await assertVariantInOrg(variantId, orgId);
+    const r = await pool.query(
+      `select cp.id, cp.competitor_name as "competitorName", ss.id as "sourceId", ss.url,
+              ss.compliance_status as "complianceStatus", snap.price_cents as "lastPriceCents", snap.observed_at as "lastScrapedAt"
+         from competitor_products cp
+         join scraping_sources ss on ss.id = cp.scraping_source_id
+         left join lateral (select price_cents, observed_at from price_snapshots
+                             where competitor_product_id = cp.id order by observed_at desc limit 1) snap on true
+        where cp.product_variant_id = $1 and ss.organization_id = $2
+        order by cp.created_at`,
+      [variantId, orgId],
+    );
+    res.json({ targets: r.rows });
+  }),
+);
+
+/** POST /api/competitors { variantId, competitorName, url } */
+router.post(
+  "/",
+  wrap(async (req, res) => {
+    const orgId = orgIdOf(req);
+    const { variantId, competitorName, url } = req.body ?? {};
+    let parsed: URL;
+    try {
+      parsed = new URL(String(url));
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error();
+    } catch {
+      throw new HttpError(400, "Enter a valid http(s) product URL.");
+    }
+    await assertVariantInOrg(String(variantId), orgId);
+    const name = String(competitorName ?? "").trim() || parsed.hostname.replace(/^www\./, "");
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const src = await client.query(
+        `insert into scraping_sources (organization_id, url) values ($1, $2)
+         on conflict (organization_id, url) do update set updated_at = now() returning id`,
+        [orgId, parsed.toString()],
+      );
+      const cp = await client.query(
+        `insert into competitor_products (product_variant_id, scraping_source_id, competitor_name)
+         values ($1, $2, $3)
+         on conflict (product_variant_id, scraping_source_id) do update set competitor_name = excluded.competitor_name
+         returning id`,
+        [variantId, src.rows[0].id, name],
+      );
+      await client.query("commit");
+      res.status(201).json({ id: cp.rows[0].id, sourceId: src.rows[0].id });
+    } catch (e) {
+      await client.query("rollback");
+      throw e;
+    } finally {
+      client.release();
+    }
+  }),
+);
+
+router.delete(
+  "/:id",
+  wrap(async (req, res) => {
+    const r = await pool.query(
+      `delete from competitor_products cp using product_variants pv, products p
+        where cp.id = $1 and pv.id = cp.product_variant_id and p.id = pv.product_id and p.organization_id = $2`,
+      [req.params.id, orgIdOf(req)],
+    );
+    if (!r.rowCount) throw new HttpError(404, "Competitor not found.");
+    res.json({ ok: true });
+  }),
+);
+
+export default router;
+
+
+=== apps/api/src/routes/onboarding.ts ===
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { randomBytes } from "crypto";
+import { pool } from "../db/pool";
+import { HttpError, wrap } from "../utils/http";
+
+const router = Router();
+const FREE_MAIL = new Set(["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "proton.me", "protonmail.com"]);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * POST /api/onboarding/register
+ * mode "create": new workspace, caller becomes owner.
+ * mode "join":   invite code -> active viewer; no code -> domain match -> pending approval.
+ * Never lists organizations. Failures are deliberately generic.
+ */
+router.post(
+  "/register",
+  wrap(async (req, res) => {
+    const { email, password, fullName, mode, orgName, inviteCode, acceptTos } = req.body ?? {};
+    const mail = String(email ?? "").trim().toLowerCase();
+    if (!EMAIL_RE.test(mail)) throw new HttpError(400, "Enter a valid email address.");
+    if (String(password ?? "").length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
+    if (!String(fullName ?? "").trim()) throw new HttpError(400, "Enter your full name.");
+    if (mode !== "create" && mode !== "join") throw new HttpError(400, "Choose to create or join a workspace.");
+    if (mode === "create" && !String(orgName ?? "").trim()) throw new HttpError(400, "Enter a workspace name.");
+    if (mode === "create" && acceptTos !== true) throw new HttpError(400, "Accept the Terms and Privacy Policy to continue.");
+
+    const domain = mail.split("@")[1];
+    const hash = await bcrypt.hash(String(password), 12);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const dup = await client.query("select 1 from users where email = $1", [mail]);
+      if (dup.rowCount) throw new HttpError(409, "An account with this email already exists. Log in instead.");
+
+      let organizationId: string;
+      let roleName: "owner" | "viewer" = "viewer";
+      let status: "active" | "invited" = "active";
+
+      if (mode === "create") {
+        const taken = await client.query("select 1 from organizations where domain = $1", [domain]);
+        const claimDomain = !FREE_MAIL.has(domain) && !taken.rowCount ? domain : null;
+        const org = await client.query(
+          `insert into organizations (name, domain, invite_code, tos_accepted_at, privacy_policy_version_accepted)
+           values ($1, $2, $3, now(), $4) returning id`,
+          [String(orgName).trim(), claimDomain, randomBytes(5).toString("hex").toUpperCase(), process.env.PRIVACY_POLICY_VERSION ?? "v1"],
+        );
+        organizationId = org.rows[0].id;
+        roleName = "owner";
+      } else {
+        const code = String(inviteCode ?? "").trim().toUpperCase();
+        const org = code
+          ? await client.query("select id from organizations where invite_code = $1", [code])
+          : await client.query("select id from organizations where domain = $1", [domain]);
+        if (!org.rowCount) {
+          throw new HttpError(404, "We couldn't find a workspace for that. Ask your workspace owner for an invite code.");
+        }
+        organizationId = org.rows[0].id;
+        // Domain match alone is unverified: hold for owner approval.
+        if (!code) status = "invited";
+      }
+
+      const user = await client.query(
+        `insert into users (organization_id, email, password_hash, full_name, status)
+         values ($1, $2, $3, $4, $5) returning id`,
+        [organizationId, mail, hash, String(fullName).trim(), status],
+      );
+      const userId: string = user.rows[0].id;
+      await client.query(
+        "insert into user_roles (user_id, role_id) select $1, id from roles where name = $2",
+        [userId, roleName],
+      );
+      await client.query("commit");
+
+      if (status === "invited") {
+        return res.status(202).json({ pending: true, message: "Request sent. A workspace owner needs to approve your access." });
+      }
+      // ALIGN the claims with what middleware/auth.ts expects.
+      const token = jwt.sign({ sub: userId, id: userId, userId, email: mail, organizationId, role: roleName }, process.env.JWT_SECRET!, { expiresIn: "7d" });
+      return res.status(201).json({ token, user: { id: userId, email: mail, fullName, organizationId, role: roleName } });
+    } catch (e) {
+      await client.query("rollback");
+      throw e;
+    } finally {
+      client.release();
+    }
+  }),
+);
+
+export default router;
+
+
+=== apps/api/src/routes/scraper.ts ===
+import { Router } from "express";
+import { pool } from "../db/pool";
+import { enqueueScrape } from "../queues/scrapeQueue";
+import { HttpError, orgIdOf, wrap } from "../utils/http";
+
+const router = Router();
+
+/** POST /api/scraper/run { sourceId }  ->  202 { jobId } */
+router.post(
+  "/run",
+  wrap(async (req, res) => {
+    const sourceId = String(req.body?.sourceId ?? "");
+    if (!sourceId) throw new HttpError(400, "sourceId is required.");
+    try {
+      const jobId = await enqueueScrape(orgIdOf(req), sourceId);
+      res.status(202).json({ jobId });
+    } catch (e: any) {
+      if (e.status) throw new HttpError(e.status, e.message);
+      throw e;
+    }
+  }),
+);
+
+router.get(
+  "/jobs/:id",
+  wrap(async (req, res) => {
+    const r = await pool.query(
+      `select id, status, failure_reason as "failureReason", result_price_cents as "priceCents",
+              result_currency as currency, method, started_at as "startedAt", finished_at as "finishedAt"
+         from scraping_job_runs where id = $1 and organization_id = $2`,
+      [req.params.id, orgIdOf(req)],
+    );
+    if (!r.rowCount) throw new HttpError(404, "Job not found.");
+    res.json(r.rows[0]);
+  }),
+);
+
+export default router;
+
+
+=== apps/api/src/routes/search.ts ===
+import { Router } from "express";
+import { HttpError, wrap } from "../utils/http";
+import { searchCompetitorListings } from "../services/serpService";
+
+const router = Router();
+
+/** GET /api/search/competitors?q=keywords-or-EAN */
+router.get(
+  "/competitors",
+  wrap(async (req, res) => {
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 3) throw new HttpError(400, "Enter at least 3 characters or a full EAN.");
+    try {
+      res.json({ results: await searchCompetitorListings(q) });
+    } catch (e) {
+      console.error("[search] SERP failure", e);
+      throw new HttpError(502, "Market search is unavailable right now. Try again in a minute.");
+    }
+  }),
+);
+
+export default router;
+
+
+=== apps/api/src/services/billingOverview.ts ===
+import { query } from "../db/pool";
+
+export interface BillingOverview {
+  organization: string;
+  inviteCode: string | null;
+  planName: string;
+  credits: { total: number; used: number; remaining: number };
+  creditsEnforced: boolean;
+  upgradeOptions: Array<{
+    id: string; name: string; tracked_sources_included: number | null;
+    price_cents_monthly: number | null; starting_floor_cents_monthly?: number; billing: string;
+  }>;
+}
+
+export async function getBillingOverview(organizationId: string, userId?: string): Promise<BillingOverview> {
+  const [org] = await query<{ name: string; invite_code: string | null; total: number; used: number }>(
+    `select name, invite_code, scraping_credits_total as total, scraping_credits_used as used
+       from organizations where id = $1`,
+    [organizationId],
+  );
+  const [sub] = await query<{ plan_name: string }>(
+    `select p.name as plan_name from subscriptions s join plans p on p.id = s.plan_id
+      where s.organization_id = $1 order by s.current_period_end desc nulls last limit 1`,
+    [organizationId],
+  );
+  const plans = await query<{ id: string; name: string; pricing_model: any }>(
+    "select id, name, pricing_model from plans order by (pricing_model->>'price_cents_monthly')::int nulls last",
+  );
+  let isOwner = false;
+  if (userId) {
+    const r = await query(
+      "select 1 from user_roles ur join roles r on r.id = ur.role_id where ur.user_id = $1 and r.name = 'owner' limit 1",
+      [userId],
+    );
+    isOwner = r.length > 0;
+  }
+  return {
+    organization: org.name,
+    inviteCode: isOwner ? org.invite_code : null, // only owners see the invite code
+    planName: sub?.plan_name ?? "Starter",
+    credits: { total: org.total, used: org.used, remaining: Math.max(org.total - org.used, 0) },
+    creditsEnforced: process.env.ENFORCE_SCRAPING_CREDITS === "true",
+    upgradeOptions: plans.map((p) => ({ id: p.id, name: p.name, ...p.pricing_model })),
+  };
+}
+
+
+=== apps/api/src/services/procurementAdvisor.ts ===
+import { pool } from "../db/pool";
+
+export type Recommendation = "RESTOCK_NOW" | "OPPORTUNITY_BUY" | "HOLD" | "LIQUIDATE";
+
+export interface AdvisorInput {
+  stock: number;
+  capacity: number;
+  reorderPoint: number;
+  salesVelocity: number; // units/day
+  costCents: number;
+  marketCents: number | null;
+  prevMarketCents: number | null;
+}
+
+export interface AdvisorResult {
+  tag: Recommendation;
+  reason: string;
+  stockPct: number;
+  marginPct: number | null;
+  marketTrendPct: number | null;
+  daysOfCover: number | null;
+  suggestedQty: number;
+}
+
+const OPPORTUNITY_MARGIN_PCT = 40;
+const FALLING_MARKET = -3; // % change over ~7 days
+const LOW_VELOCITY_COVER_DAYS = 90;
+
+/** Pure function: easy to unit test. */
+export function evaluate(i: AdvisorInput): AdvisorResult {
+  const stockPct = i.capacity > 0 ? (i.stock / i.capacity) * 100 : 0;
+  const daysOfCover = i.salesVelocity > 0 ? i.stock / i.salesVelocity : null;
+  const marginPct = i.marketCents && i.marketCents > 0 ? ((i.marketCents - i.costCents) / i.marketCents) * 100 : null;
+  const trend = i.marketCents && i.prevMarketCents ? ((i.marketCents - i.prevMarketCents) / i.prevMarketCents) * 100 : null;
+  const room = Math.max(i.capacity - i.stock, 0);
+  const base = { stockPct, marginPct, marketTrendPct: trend, daysOfCover };
+
+  const lowVelocity = i.salesVelocity <= 0 || (daysOfCover !== null && daysOfCover > LOW_VELOCITY_COVER_DAYS);
+  const marketFalling = trend !== null && trend <= FALLING_MARKET;
+
+  if (stockPct > 85 && (lowVelocity || marketFalling)) {
+    return { ...base, tag: "LIQUIDATE", suggestedQty: 0,
+      reason: marketFalling && !lowVelocity
+        ? `Stock is ${stockPct.toFixed(0)}% of capacity and competitor prices fell ${Math.abs(trend!).toFixed(1)}%. Mark down before margin erodes.`
+        : `Stock is ${stockPct.toFixed(0)}% of capacity with slow sales. Mark down to free up cash.` };
+  }
+  if (i.stock < i.reorderPoint && i.salesVelocity > 0) {
+    return { ...base, tag: "RESTOCK_NOW", suggestedQty: Math.max(Math.min(Math.ceil(i.salesVelocity * 30), room), 1),
+      reason: `${i.stock} on hand, below the reorder point of ${i.reorderPoint}. ~${daysOfCover!.toFixed(0)} days of cover at current sales.` };
+  }
+  if (marginPct !== null && marginPct >= OPPORTUNITY_MARGIN_PCT && stockPct <= 60 && !marketFalling && room > 0) {
+    return { ...base, tag: "OPPORTUNITY_BUY", suggestedQty: Math.max(Math.min(Math.ceil(i.salesVelocity * 45), room), 1),
+      reason: `Competitors sell at ${marginPct.toFixed(0)}% above your cost and the market is steady. Room to buy ahead.` };
+  }
+  return { ...base, tag: "HOLD", suggestedQty: 0,
+    reason: stockPct > 60 ? `Healthy stock at ${stockPct.toFixed(0)}% of capacity. No purchase needed.` : "Stock and market are within normal range." };
+}
+
+export interface RecommendationRow extends AdvisorResult {
+  variantId: string;
+  sku: string;
+  name: string;
+  stock: number;
+  capacity: number;
+  costCents: number;
+  marketCents: number | null;
+}
+
+export async function getRecommendations(orgId: string) {
+  const { rows } = await pool.query(
+    `select pv.id as variant_id, pv.sku, p.name, pv.unit_cost_cents, pv.sales_velocity::float as velocity,
+            inv.stock, inv.cap, inv.rp, mkt.market_cents, mkt.prev_cents
+       from product_variants pv
+       join products p on p.id = pv.product_id
+       cross join lateral (select coalesce(sum(on_hand),0)::int as stock, coalesce(sum(max_capacity),0)::int as cap,
+                                  coalesce(sum(reorder_point),0)::int as rp
+                             from inventory_levels where product_variant_id = pv.id) inv
+       left join lateral (
+         select avg(cur.price_cents)::float as market_cents, avg(prev.price_cents)::float as prev_cents
+           from competitor_products cp
+           join lateral (select price_cents from price_snapshots s where s.competitor_product_id = cp.id
+                          and coalesce(s.validation_flag,'ok') = 'ok' order by observed_at desc limit 1) cur on true
+           left join lateral (select price_cents from price_snapshots s where s.competitor_product_id = cp.id
+                          and s.observed_at < now() - interval '7 days' and coalesce(s.validation_flag,'ok') = 'ok'
+                          order by observed_at desc limit 1) prev on true
+          where cp.product_variant_id = pv.id) mkt on true
+      where p.organization_id = $1 and p.deleted_at is null and pv.deleted_at is null
+      order by p.name`,
+    [orgId],
+  );
+
+  const items: RecommendationRow[] = rows.map((r) => ({
+    variantId: r.variant_id, sku: r.sku, name: r.name, stock: r.stock, capacity: r.cap,
+    costCents: r.unit_cost_cents, marketCents: r.market_cents === null ? null : Math.round(r.market_cents),
+    ...evaluate({ stock: r.stock, capacity: r.cap, reorderPoint: r.rp, salesVelocity: r.velocity ?? 0,
+      costCents: r.unit_cost_cents, marketCents: r.market_cents, prevMarketCents: r.prev_cents }),
+  }));
+
+  const sum = (f: (x: RecommendationRow) => number) => items.reduce((a, x) => a + f(x), 0);
+  const summary = {
+    criticalRestocks: items.filter((x) => x.tag === "RESTOCK_NOW").length,
+    opportunityCount: items.filter((x) => x.tag === "OPPORTUNITY_BUY").length,
+    opportunityCapitalCents: sum((x) => (x.tag === "OPPORTUNITY_BUY" ? x.suggestedQty * x.costCents : 0)),
+    overstockCount: items.filter((x) => x.tag === "LIQUIDATE").length,
+    overstockValueCents: sum((x) => (x.tag === "LIQUIDATE" ? x.stock * x.costCents : 0)),
+  };
+  return { items, summary };
+}
+
+
+=== apps/api/src/services/serpService.ts ===
+export interface CompetitorListing {
+  title: string;
+  merchant: string;
+  url: string;
+  priceCents: number | null;
+  currency: string;
+  thumbnail: string | null;
+}
+
+const TIMEOUT_MS = 12_000;
+
+/** SerpAPI Google Shopping search. Swap the body for DataForSEO if you prefer. */
+export async function searchCompetitorListings(query: string, limit = 10): Promise<CompetitorListing[]> {
+  const key = process.env.SERPAPI_KEY;
+  if (!key) throw new Error("SERPAPI_KEY is not configured");
+  const params = new URLSearchParams({ engine: "google_shopping", q: query, api_key: key, num: String(limit) });
+  const res = await fetch(`https://serpapi.com/search.json?${params}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`SerpAPI responded ${res.status}`);
+  const data = (await res.json()) as { shopping_results?: any[] };
+  return (data.shopping_results ?? [])
+    .map((r): CompetitorListing | null => {
+      const url: string | undefined = r.product_link ?? r.link;
+      if (!url || !r.title) return null;
+      const price = typeof r.extracted_price === "number" ? Math.round(r.extracted_price * 100) : null;
+      return {
+        title: String(r.title),
+        merchant: String(r.source ?? "Unknown seller"),
+        url,
+        priceCents: price,
+        currency: "USD",
+        thumbnail: r.thumbnail ?? null,
+      };
+    })
+    .filter((x): x is CompetitorListing => x !== null)
+    .slice(0, limit);
+}
+
+
+=== apps/api/src/services/scraper/brightDataClient.ts ===
+import { chromium } from "playwright-core";
+
+/** Fallback: remote Bright Data Scraping Browser over WebSocket (BRIGHTDATA_WS_ENDPOINT). */
+export async function fetchHtmlViaBrowser(targetUrl: string): Promise<string> {
+  const ws = process.env.BRIGHTDATA_WS_ENDPOINT;
+  if (!ws) throw new Error("BRIGHTDATA_WS_ENDPOINT is not configured");
+  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
+  try {
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = await context.newPage();
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => undefined); // best effort
+    return await page.content();
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+
+=== apps/api/src/services/scraper/jsonLdParser.ts ===
+import * as cheerio from "cheerio";
+
+export interface ParsedPrice {
+  priceCents: number;
+  currency: string;
+  inStock: boolean | null;
+  via: "json-ld" | "selector";
+}
+
+/** "1,299.00", "€ 12,50", "1.299,00" -> cents. Returns null if not a usable number. */
+export function parsePriceToCents(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) && raw > 0 ? Math.round(raw * 100) : null;
+  if (typeof raw !== "string") return null;
+  let s = raw.replace(/[^\d.,]/g, "");
+  if (!s) return null;
+  const lastComma = s.lastIndexOf(",");
+  const lastDot = s.lastIndexOf(".");
+  if (lastComma > lastDot) s = s.replace(/\./g, "").replace(",", "."); // European format
+  else s = s.replace(/,/g, "");
+  const n = parseFloat(s);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
+}
+
+const isType = (node: any, t: string) => [].concat(node?.["@type"] ?? []).some((x: string) => String(x).toLowerCase() === t);
+
+function flatten(node: any, out: any[] = []): any[] {
+  if (Array.isArray(node)) node.forEach((n) => flatten(n, out));
+  else if (node && typeof node === "object") {
+    out.push(node);
+    if (node["@graph"]) flatten(node["@graph"], out);
+  }
+  return out;
+}
+
+function pickOffer(offers: any): any | null {
+  const list = flatten(offers).filter((o) => o.price != null || o.lowPrice != null || o.priceSpecification);
+  return list[0] ?? null;
+}
+
+export function extractFromJsonLd(html: string): ParsedPrice | null {
+  const $ = cheerio.load(html);
+  for (const el of $('script[type="application/ld+json"]').toArray()) {
+    let json: unknown;
+    try {
+      json = JSON.parse($(el).contents().text());
+    } catch {
+      continue; // malformed block, try next
+    }
+    for (const node of flatten(json)) {
+      if (!isType(node, "product")) continue;
+      const offer = pickOffer(node.offers);
+      if (!offer) continue;
+      const spec = offer.priceSpecification && flatten(offer.priceSpecification)[0];
+      const cents = parsePriceToCents(offer.price ?? offer.lowPrice ?? spec?.price);
+      if (!cents) continue;
+      const avail = String(offer.availability ?? "");
+      return {
+        priceCents: cents,
+        currency: String(offer.priceCurrency ?? spec?.priceCurrency ?? "USD").toUpperCase().slice(0, 3),
+        inStock: avail ? /InStock|LimitedAvailability|PreOrder/i.test(avail) : null,
+        via: "json-ld",
+      };
+    }
+  }
+  return null;
+}
+
+const SELECTORS: Array<[string, string?]> = [
+  ['meta[property="product:price:amount"]', "content"],
+  ['meta[property="og:price:amount"]', "content"],
+  ['[itemprop="price"]', "content"],
+  ['[itemprop="price"]'],
+  ['[data-price]', "data-price"],
+  [".price .amount"],
+  [".product-price"],
+  ["#priceblock_ourprice"],
+  [".price"],
+];
+
+export function extractFromSelectors(html: string): ParsedPrice | null {
+  const $ = cheerio.load(html);
+  const currency =
+    $('meta[property="product:price:currency"], meta[property="og:price:currency"], [itemprop="priceCurrency"]').first().attr("content") ?? "USD";
+  for (const [sel, attr] of SELECTORS) {
+    const el = $(sel).first();
+    if (!el.length) continue;
+    const cents = parsePriceToCents(attr ? el.attr(attr) : el.text());
+    if (cents) return { priceCents: cents, currency: currency.toUpperCase().slice(0, 3), inStock: null, via: "selector" };
+  }
+  return null;
+}
+
+/** JSON-LD first, CSS selectors second. */
+export function extractPriceFromHtml(html: string): ParsedPrice | null {
+  return extractFromJsonLd(html) ?? extractFromSelectors(html);
+}
+
+
+=== apps/api/src/services/scraper/scraperEngine.ts ===
+import { extractPriceFromHtml, type ParsedPrice } from "./jsonLdParser";
+import { fetchHtmlViaApi } from "./zenrowsClient";
+import { fetchHtmlViaBrowser } from "./brightDataClient";
+
+export interface ScrapeResult extends ParsedPrice {
+  method: "api" | "browser";
+}
+
+/** Pipeline: API fetch -> JSON-LD/selectors -> (on failure) remote browser -> JSON-LD/selectors. */
+export async function scrapePrice(url: string): Promise<ScrapeResult> {
+  const errors: string[] = [];
+
+  try {
+    const parsed = extractPriceFromHtml(await fetchHtmlViaApi(url));
+    if (parsed) return { ...parsed, method: "api" };
+    errors.push("api: no price found in page");
+  } catch (e) {
+    errors.push(`api: ${(e as Error).message}`);
+  }
+
+  try {
+    const parsed = extractPriceFromHtml(await fetchHtmlViaBrowser(url));
+    if (parsed) return { ...parsed, method: "browser" };
+    errors.push("browser: no price found in page");
+  } catch (e) {
+    errors.push(`browser: ${(e as Error).message}`);
+  }
+
+  throw new Error(errors.join(" | "));
+}
+
+
+=== apps/api/src/services/scraper/zenrowsClient.ts ===
+const TIMEOUT_MS = 45_000;
+
+/** Fetches rendered HTML through ZenRows (set SCRAPING_PROVIDER=scrapingbee to switch). */
+export async function fetchHtmlViaApi(targetUrl: string): Promise<string> {
+  const provider = (process.env.SCRAPING_PROVIDER ?? "zenrows").toLowerCase();
+  const key = process.env.SCRAPING_API_KEY;
+  if (!key) throw new Error("SCRAPING_API_KEY is not configured");
+
+  const endpoint =
+    provider === "scrapingbee"
+      ? `https://app.scrapingbee.com/api/v1/?${new URLSearchParams({ api_key: key, url: targetUrl, render_js: "true", premium_proxy: "true" })}`
+      : `https://api.zenrows.com/v1/?${new URLSearchParams({ apikey: key, url: targetUrl, js_render: "true", premium_proxy: "true" })}`;
+
+  const res = await fetch(endpoint, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`${provider} responded ${res.status}`);
+  const html = await res.text();
+  if (html.length < 200) throw new Error(`${provider} returned an empty page`);
+  return html;
+}
+
+
+=== apps/api/src/queues/scrapeQueue.ts ===
+import { Queue, Worker, type Job } from "bullmq";
+import IORedis from "ioredis";
+import { pool } from "../db/pool";
+import { scrapePrice } from "../services/scraper/scraperEngine";
+import { activateTrialIfNeeded } from "../services/billing";
+
+// Your pricing doc says "soft nudge, never lock out", so credits only block scraping when this is "true".
+const ENFORCE_CREDITS = process.env.ENFORCE_SCRAPING_CREDITS === "true";
+
+export interface ScrapeJobData {
+  jobRunId: string;
+  sourceId: string;
+  organizationId: string;
+}
+
+const QUEUE = "scrape";
+// Redis is optional: without REDIS_URL the queue stays off instead of retry-looping against localhost.
+const REDIS_URL = process.env.REDIS_URL;
+const connection = REDIS_URL ? new IORedis(REDIS_URL, { maxRetriesPerRequest: null }) : null;
+export const scrapeQueue = connection ? new Queue<ScrapeJobData>(QUEUE, { connection }) : null;
+const ATTEMPTS = 3;
+
+/** Creates a scraping_job_runs row and enqueues it. Verifies the source belongs to the org. */
+export async function enqueueScrape(organizationId: string, sourceId: string): Promise<string> {
+  if (!scrapeQueue) {
+    throw Object.assign(new Error("Background scraping isn't configured yet (REDIS_URL is not set)."), { status: 503 });
+  }
+  const src = await pool.query("select compliance_status from scraping_sources where id = $1 and organization_id = $2", [sourceId, organizationId]);
+  if (!src.rowCount) throw Object.assign(new Error("Source not found"), { status: 404 });
+  if (src.rows[0].compliance_status === "manual_only") {
+    throw Object.assign(new Error("This source is marked manual-only and can't be scraped automatically."), { status: 409 });
+  }
+  const run = await pool.query(
+    "insert into scraping_job_runs (scraping_source_id, organization_id, status) values ($1, $2, 'queued') returning id",
+    [sourceId, organizationId],
+  );
+  const jobRunId: string = run.rows[0].id;
+  await scrapeQueue.add("scrape", { jobRunId, sourceId, organizationId }, {
+    jobId: jobRunId,
+    attempts: ATTEMPTS,
+    backoff: { type: "exponential", delay: 15_000 },
+    removeOnComplete: 1000,
+    removeOnFail: 1000,
+  });
+  return jobRunId;
+}
+
+async function processJob(job: Job<ScrapeJobData>) {
+  const { jobRunId, sourceId, organizationId } = job.data;
+  await pool.query("update scraping_job_runs set status = 'running', started_at = coalesce(started_at, now()) where id = $1", [jobRunId]);
+
+  const credits = await pool.query("select scraping_credits_total - scraping_credits_used as remaining from organizations where id = $1", [organizationId]);
+  if (!credits.rowCount) {
+    await fail(jobRunId, sourceId, "Organization not found.");
+    return;
+  }
+  if (ENFORCE_CREDITS && credits.rows[0].remaining <= 0) {
+    await fail(jobRunId, sourceId, "Out of scraping credits. Upgrade your plan to keep tracking prices.");
+    return; // no retry: retrying cannot fix this
+  }
+
+  const src = await pool.query("select url from scraping_sources where id = $1 and organization_id = $2", [sourceId, organizationId]);
+  if (!src.rowCount) return fail(jobRunId, sourceId, "Source no longer exists.");
+
+  try {
+    const r = await scrapePrice(src.rows[0].url);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      // Only successful scrapes cost a credit. The guard applies only when enforcement is on.
+      const spent = await client.query(
+        `update organizations set scraping_credits_used = scraping_credits_used + 1, updated_at = now()
+          where id = $1 ${ENFORCE_CREDITS ? "and scraping_credits_used < scraping_credits_total" : ""}`,
+        [organizationId],
+      );
+      if (!spent.rowCount) throw new Error("Out of scraping credits.");
+      await client.query(
+        `insert into price_snapshots (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
+         select id, $2, $3, $4, 'scraped', 'ok' from competitor_products where scraping_source_id = $1`,
+        [sourceId, r.priceCents, r.currency, r.inStock],
+      );
+      await client.query("update scraping_sources set last_checked_at = now(), last_status = 'ok', updated_at = now() where id = $1", [sourceId]);
+      await client.query(
+        `update scraping_job_runs set status = 'succeeded', finished_at = now(), result_price_cents = $2, result_currency = $3, method = $4
+          where id = $1`,
+        [jobRunId, r.priceCents, r.currency, r.method],
+      );
+      await client.query("commit");
+      // Your existing helper starts the trial clock (idempotent). Runs after commit; never fails the job.
+      await activateTrialIfNeeded(organizationId).catch((e) => console.warn("[scrape] trial activation failed", e));
+    } catch (e) {
+      await client.query("rollback");
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+    if (finalAttempt) await fail(jobRunId, sourceId, (e as Error).message);
+    throw e; // lets BullMQ retry with backoff
+  }
+}
+
+async function fail(jobRunId: string, sourceId: string, reason: string) {
+  await pool.query("update scraping_job_runs set status = 'failed', failure_reason = $2, finished_at = now() where id = $1", [jobRunId, reason.slice(0, 1000)]);
+  await pool.query("update scraping_sources set last_checked_at = now(), last_status = 'failed', updated_at = now() where id = $1", [sourceId]);
+}
+
+export function startScrapeWorker(): Worker<ScrapeJobData> | null {
+  if (!connection) {
+    console.warn("[scrape] REDIS_URL not set: scrape worker disabled");
+    return null;
+  }
+  const worker = new Worker<ScrapeJobData>(QUEUE, processJob, { connection, concurrency: Number(process.env.SCRAPE_CONCURRENCY ?? 3) });
+  worker.on("failed", (job, err) => console.warn(`[scrape] job ${job?.id} attempt ${job?.attemptsMade} failed: ${err.message}`));
+  worker.on("completed", (job) => console.log(`[scrape] job ${job.id} done`));
+  return worker;
+}
+
+
+=== apps/api/src/utils/http.ts ===
+import type { NextFunction, Request, RequestHandler, Response } from "express";
+
+export class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Wraps an async handler so rejections reach the error middleware. */
+export const wrap =
+  (fn: (req: Request, res: Response) => Promise<unknown>): RequestHandler =>
+  (req, res, next) => {
+    fn(req, res).catch(next);
+  };
+
+/**
+ * Single place that reads the tenant from the authenticated request.
+ * ADJUST this if your middleware/auth.ts stores the JWT claims elsewhere.
+ */
+export function orgIdOf(req: Request): string {
+  const id = (req as any).user?.organizationId as string | undefined;
+  if (!id) throw new HttpError(401, "Not authenticated");
+  return id;
+}
+export function userIdOf(req: Request): string {
+  const id = ((req as any).user?.id ?? (req as any).user?.userId ?? (req as any).user?.sub) as string | undefined;
+  if (!id) throw new HttpError(401, "Not authenticated");
+  return id;
+}
+
+export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  console.error("[api] unhandled error", err);
+  return res.status(500).json({ error: "Something went wrong. Try again." });
+}
+
+
+=== apps/api/src/db/migrations/002_modules.sql ===
+-- Run once: psql "$DATABASE_URL" -f apps/api/src/db/migrations/002_modules.sql
+begin;
+
+alter table organizations
+  add column if not exists domain text unique,
+  add column if not exists invite_code text unique,
+  add column if not exists scraping_credits_total integer not null default 1000,
+  add column if not exists scraping_credits_used integer not null default 0;
+
+update organizations
+   set invite_code = upper(substr(md5(random()::text || id::text), 1, 10))
+ where invite_code is null;
+
+alter table inventory_levels add column if not exists max_capacity integer not null default 100;
+alter table product_variants add column if not exists sales_velocity numeric(10,2) not null default 0;
+
+alter table scraping_job_runs
+  add column if not exists organization_id uuid references organizations(id),
+  add column if not exists result_price_cents integer,
+  add column if not exists result_currency char(3),
+  add column if not exists method text;
+
+create unique index if not exists idx_sources_org_url on scraping_sources (organization_id, url);
+create unique index if not exists idx_comp_variant_source on competitor_products (product_variant_id, scraping_source_id);
+
+commit;
+
+
+=== apps/api/.env.example ===
+DATABASE_URL=postgres://localhost:5432/marginview
+JWT_SECRET=change-me-in-production
+PORT=4000
+FRONTEND_URL=http://localhost:5173,http://localhost:5174
+
+=== apps/web/src/components/ProductFormModal.tsx ===
+import React, { useState } from "react";
+import { CATEGORIES, type InventoryLevel, type Location, type ProductDraft } from "../types/inventory";
+import { dollarsToCents } from "../utils/csvParser";
+import CompetitorUrlInput, { type CompetitorEntry } from "./inventory/CompetitorUrlInput";
+import "../styles/modules.css";
+
+// Dark-theme styling. Override --mv-* variables in your tokens.css to match the live palette.
+const C = {
+  surface: "var(--mv-surface, #121a16)",
+  field: "var(--mv-field, #0c120f)",
+  border: "var(--mv-border, rgba(255,255,255,0.12))",
+  text: "var(--mv-text, #e8efe9)",
+  muted: "var(--mv-muted, #8fa396)",
+  accent: "var(--mv-accent, #3fae7a)",
+  accentText: "var(--mv-accent-text, #06130d)",
+  danger: "var(--mv-danger, #e5735f)",
+};
+
+export const primaryButtonStyle: React.CSSProperties = {
+  background: C.accent,
+  color: C.accentText,
+  border: "none",
+  borderRadius: 6,
+  padding: "8px 16px",
+  fontWeight: 600,
+  cursor: "pointer",
+};
+export const secondaryButtonStyle: React.CSSProperties = {
+  background: "transparent",
+  color: C.text,
+  border: `1px solid ${C.border}`,
+  borderRadius: 6,
+  padding: "8px 16px",
+  fontWeight: 500,
+  cursor: "pointer",
+};
+
+interface Props {
+  mode: "add" | "edit";
+  /** Existing level when editing (SKU, name, category, cost are editable; stock is edited in the table). */
+  initial?: InventoryLevel;
+  locations: Location[];
+  onClose: () => void;
+  /** Resolve with an error message to show inline, or null on success. */
+  /** Second argument carries any competitor URLs added in the form (existing callers can ignore it). */
+  onSubmit: (draft: ProductDraft, competitors: CompetitorEntry[]) => Promise<string | null>;
+}
+
+export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }: Props) {
+  const [sku, setSku] = useState(initial?.sku ?? "");
+  const [name, setName] = useState(initial?.product_name ?? "");
+  const [category, setCategory] = useState(initial?.category ?? CATEGORIES[0]);
+  const [cost, setCost] = useState(initial ? (initial.cost / 100).toFixed(2) : "");
+  const [quantity, setQuantity] = useState(initial ? String(initial.quantity) : "0");
+  const [reorder, setReorder] = useState(initial ? String(initial.reorder_level) : "10");
+  const [locationId, setLocationId] = useState(initial?.location_id ?? locations[0]?.id ?? "");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [competitors, setCompetitors] = useState<CompetitorEntry[]>([]);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const errs: Record<string, string> = {};
+    if (!sku.trim()) errs.sku = "SKU is required.";
+    if (!name.trim()) errs.name = "Product name is required.";
+    const costCents = dollarsToCents(cost);
+    if (costCents === null || costCents <= 0) errs.cost = "Enter an amount greater than 0 (e.g. 12.50).";
+    if (mode === "add") {
+      if (!/^\d+$/.test(quantity)) errs.quantity = "Whole number, 0 or more.";
+      if (!/^\d+$/.test(reorder)) errs.reorder = "Whole number, 0 or more.";
+    }
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+
+    setSaving(true);
+    setFormError(null);
+    const message = await onSubmit({
+      sku: sku.trim(),
+      name: name.trim(),
+      category,
+      cost_cents: costCents!,
+      quantity: Number(quantity),
+      reorder_level: Number(reorder),
+      location_id: locationId || undefined,
+    }, competitors);
+    setSaving(false);
+    if (message) setFormError(message);
+    else onClose();
+  }
+
+  const input = (hasError: boolean): React.CSSProperties => ({
+    width: "100%",
+    boxSizing: "border-box",
+    background: C.field,
+    color: C.text,
+    border: `1px solid ${hasError ? C.danger : C.border}`,
+    borderRadius: 6,
+    padding: "8px 10px",
+    fontSize: 14,
+  });
+  const label: React.CSSProperties = { display: "block", color: C.muted, fontSize: 13, marginBottom: 4 };
+  const errText = (k: string) => errors[k] && <div style={{ color: C.danger, fontSize: 12, marginTop: 4 }}>{errors[k]}</div>;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={mode === "add" ? "Add product" : "Edit product"}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 50, padding: 16 }}
+      onClick={onClose}
+    >
+      <form
+        onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
+        noValidate
+        style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, width: "100%", maxWidth: 480, display: "grid", gap: 14 }}
+      >
+        <h2 style={{ margin: 0, fontSize: 18 }}>{mode === "add" ? "Add product" : "Edit product"}</h2>
+
+        <div>
+          <label style={label} htmlFor="pf-sku">SKU</label>
+          <input id="pf-sku" style={input(!!errors.sku)} value={sku} onChange={(e) => setSku(e.target.value)} />
+          {errText("sku")}
+        </div>
+        <div>
+          <label style={label} htmlFor="pf-name">Product name</label>
+          <input id="pf-name" style={input(!!errors.name)} value={name} onChange={(e) => setName(e.target.value)} />
+          {errText("name")}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={label} htmlFor="pf-cat">Category</label>
+            <select id="pf-cat" style={input(false)} value={category} onChange={(e) => setCategory(e.target.value)}>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              {!(CATEGORIES as readonly string[]).includes(category) && <option value={category}>{category}</option>}
+            </select>
+          </div>
+          <div>
+            <label style={label} htmlFor="pf-cost">Cost price (USD)</label>
+            <input id="pf-cost" inputMode="decimal" style={input(!!errors.cost)} value={cost} onChange={(e) => setCost(e.target.value)} />
+            {errText("cost")}
+          </div>
+        </div>
+
+        {mode === "add" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={label} htmlFor="pf-qty">Stock quantity</label>
+                <input id="pf-qty" inputMode="numeric" style={input(!!errors.quantity)} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+                {errText("quantity")}
+              </div>
+              <div>
+                <label style={label} htmlFor="pf-reorder">Reorder level</label>
+                <input id="pf-reorder" inputMode="numeric" style={input(!!errors.reorder)} value={reorder} onChange={(e) => setReorder(e.target.value)} />
+                {errText("reorder")}
+              </div>
+            </div>
+            {locations.length > 0 && (
+              <div>
+                <label style={label} htmlFor="pf-loc">Location</label>
+                <select id="pf-loc" style={input(false)} value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+                  {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Re-map the shared tokens so the competitor controls match this dark modal */}
+        <div
+          style={{
+            "--m-surface": C.surface, "--m-bg": C.field, "--m-border": C.border,
+            "--m-text": C.text, "--m-muted": C.muted, "--m-accent": C.accent, "--m-danger": C.danger,
+          } as React.CSSProperties}
+        >
+          <CompetitorUrlInput value={competitors} onChange={setCompetitors} searchHint={name} />
+          {mode === "edit" && (
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 6 }}>
+              New URLs are added here. To review, check or remove existing ones, use the Competitors button on the row.
+            </div>
+          )}
+        </div>
+
+        {formError && <div role="alert" style={{ color: C.danger, fontSize: 13 }}>{formError}</div>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" style={secondaryButtonStyle} onClick={onClose}>Cancel</button>
+          <button type="submit" style={{ ...primaryButtonStyle, opacity: saving ? 0.6 : 1 }} disabled={saving}>
+            {saving ? "Saving…" : mode === "add" ? "Add product" : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/billing/OrgBillingOverview.tsx ===
+import { money, useMv } from "../../lib/mv";
+import "../../styles/modules.css";
+
+interface Overview {
+  organization: string;
+  inviteCode: string | null;
+  planName: string;
+  credits: { total: number; used: number; remaining: number };
+  creditsEnforced: boolean;
+  upgradeOptions: Array<{ id: string; name: string; tracked_sources_included: number | null; price_cents_monthly: number | null; starting_floor_cents_monthly?: number; billing: string }>;
+}
+
+export default function OrgBillingOverview() {
+  const { data, error, loading, reload } = useMv<Overview>("/api/billing/overview");
+
+  if (loading) return <div className="card mv-muted" role="status">Loading credits…</div>;
+  if (error || !data)
+    return (
+      <div className="card" role="alert">
+        <p className="mv-err" style={{ marginTop: 0 }}>{error ?? "Couldn't load credits and plans."}</p>
+        <button className="btn" onClick={reload}>Try again</button>
+      </div>
+    );
+
+  const { credits } = data;
+  const pct = credits.total ? Math.min((credits.used / credits.total) * 100, 100) : 0;
+  const tone = pct >= 100 ? "bad" : pct >= 80 ? "warn" : "";
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <section className="card">
+        <div className="mv-row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+          <strong>{credits.remaining.toLocaleString()} credits left for {data.organization}</strong>
+          <span className="mv-muted">{credits.used.toLocaleString()} of {credits.total.toLocaleString()} used</span>
+        </div>
+        <div className={`mv-bar ${tone}`} role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label="Scraping credits used">
+          <span style={{ width: `${pct}%` }} />
+        </div>
+        <p className="mv-muted" style={{ marginBottom: 0 }}>
+          One credit is used for each successful price check.
+          {credits.remaining === 0 && (data.creditsEnforced ? " Price checks are paused until you upgrade." : " Price checks continue, but consider upgrading.")}
+        </p>
+        {data.inviteCode && <p className="mv-muted" style={{ marginBottom: 0 }}>Teammate invite code: <code>{data.inviteCode}</code></p>}
+      </section>
+
+      <section className="mv-grid">
+        {data.upgradeOptions.map((p) => {
+          const current = p.name === data.planName;
+          const price = p.price_cents_monthly != null ? `${money(p.price_cents_monthly)}/mo` : p.starting_floor_cents_monthly ? `From ${money(p.starting_floor_cents_monthly)}/mo` : "Custom";
+          return (
+            <div key={p.id} className="card">
+              <strong>{p.name}</strong>
+              <p style={{ fontSize: 22, fontWeight: 700, margin: "6px 0" }}>{price}</p>
+              <p className="mv-muted">{p.tracked_sources_included ?? "Unlimited"} tracked sources</p>
+              {current ? <button className="btn" disabled>Current plan</button> : <a className="btn primary" href="/contact">Talk to us about {p.name}</a>}
+            </div>
+          );
+        })}
+      </section>
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/billing/WorkspaceChoice.tsx ===
+/** Drop into pages/SignUp.tsx (or Onboarding.tsx). Controlled; POST the values to /api/onboarding/register. */
+export type WorkspaceMode = "create" | "join";
+export interface WorkspaceValue { mode: WorkspaceMode; orgName: string; inviteCode: string }
+
+export default function WorkspaceChoice({ value, onChange }: { value: WorkspaceValue; onChange: (v: WorkspaceValue) => void }) {
+  const set = (patch: Partial<WorkspaceValue>) => onChange({ ...value, ...patch });
+  return (
+    <fieldset style={{ border: 0, padding: 0, display: "grid", gap: 10 }}>
+      <legend style={{ fontWeight: 600, marginBottom: 6 }}>Workspace</legend>
+      <label className={`mv-radio ${value.mode === "create" ? "on" : ""}`}>
+        <input type="radio" name="ws" checked={value.mode === "create"} onChange={() => set({ mode: "create" })} />
+        <span>Create new workspace</span>
+      </label>
+      {value.mode === "create" && (
+        <input className="mv-input" placeholder="Workspace name" value={value.orgName} onChange={(e) => set({ orgName: e.target.value })} required />
+      )}
+      <label className={`mv-radio ${value.mode === "join" ? "on" : ""}`}>
+        <input type="radio" name="ws" checked={value.mode === "join"} onChange={() => set({ mode: "join" })} />
+        <span>Join existing workspace with invite code</span>
+      </label>
+      {value.mode === "join" && (
+        <>
+          <input className="mv-input" placeholder="Invite code (or leave blank to match your work email domain)" value={value.inviteCode} onChange={(e) => set({ inviteCode: e.target.value })} />
+          <span className="mv-muted">Domain matches need approval from a workspace owner.</span>
+        </>
+      )}
+    </fieldset>
+  );
+}
+
+
+=== apps/web/src/components/inventory/CompetitorSearchBar.tsx ===
+import { useState } from "react";
+import { mv, money } from "../../lib/mv";
+
+export interface Listing { title: string; merchant: string; url: string; priceCents: number | null; thumbnail: string | null }
+
+export default function CompetitorSearchBar({ initialQuery = "", trackedUrls = [], onTrack }: {
+  initialQuery?: string; trackedUrls?: string[]; onTrack: (l: Listing) => void;
+}) {
+  const [q, setQ] = useState(initialQuery);
+  const [results, setResults] = useState<Listing[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function search() {
+    if (q.trim().length < 3) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await mv<{ results: Listing[] }>("GET", `/api/search/competitors?q=${encodeURIComponent(q.trim())}`);
+      setResults(r.results);
+    } catch (err) { setError((err as Error).message); setResults(null); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div className="mv-row">
+        <input
+          className="mv-input" style={{ flex: 1 }} value={q} onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void search(); } }}
+          placeholder="Product name or EAN" aria-label="Search competitor listings"
+        />
+        <button type="button" className="mv-btn primary" disabled={busy || q.trim().length < 3} onClick={() => void search()}>
+          {busy ? "Searching…" : "Search market"}
+        </button>
+      </div>
+      {error && <p className="mv-err" role="alert">{error}</p>}
+      {results?.length === 0 && <p className="mv-muted">No listings found. Try the EAN or fewer keywords.</p>}
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 8 }}>
+        {results?.map((r) => {
+          const tracked = trackedUrls.includes(r.url);
+          return (
+            <li key={r.url} className="mv-card mv-row" style={{ padding: 12, justifyContent: "space-between" }}>
+              <div className="mv-row" style={{ minWidth: 0, flex: 1 }}>
+                {r.thumbnail && <img src={r.thumbnail} alt="" width={44} height={44} style={{ objectFit: "contain" }} />}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
+                  <div className="mv-muted">{r.merchant} · {money(r.priceCents)}</div>
+                </div>
+              </div>
+              <button type="button" className="mv-btn" disabled={tracked} onClick={() => onTrack(r)}>{tracked ? "Tracked" : "Track URL"}</button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/inventory/CompetitorTargetsModal.tsx ===
+import { useCallback, useEffect, useState } from "react";
+import { mv, money } from "../../lib/mv";
+import CompetitorUrlInput, { saveCompetitorTargets, type CompetitorEntry } from "./CompetitorUrlInput";
+import "../../styles/modules.css";
+
+interface Target {
+  id: string; competitorName: string; sourceId: string; url: string;
+  complianceStatus: string; lastPriceCents: number | null; lastScrapedAt: string | null;
+}
+
+export default function CompetitorTargetsModal({ variantId, title, onClose }: { variantId: string; title: string; onClose: () => void }) {
+  const [targets, setTargets] = useState<Target[]>([]);
+  const [pending, setPending] = useState<CompetitorEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await mv<{ targets: Target[] }>("GET", `/api/competitors?variantId=${encodeURIComponent(variantId)}`);
+      setTargets(r.targets); setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  }, [variantId]);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function savePending() {
+    setBusy("save"); setError(null);
+    try { await saveCompetitorTargets(variantId, pending); setPending([]); setNotice("Competitor URLs saved."); await load(); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(null); }
+  }
+  async function checkNow(t: Target) {
+    setBusy(t.id); setError(null);
+    try { await mv("POST", "/api/scraper/run", { sourceId: t.sourceId }); setNotice(`Price check queued for ${t.competitorName}. Reopen this window in a minute.`); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(null); }
+  }
+  async function remove(t: Target) {
+    setBusy(t.id); setError(null);
+    try { await mv("DELETE", `/api/competitors/${t.id}`); await load(); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(null); }
+  }
+
+  return (
+    <div className="mv-overlay" onClick={onClose}>
+      <div className="mv-modal" role="dialog" aria-modal="true" aria-label={`Competitors for ${title}`} onClick={(e) => e.stopPropagation()}>
+        <div className="mv-row" style={{ justifyContent: "space-between" }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Competitors for {title}</h2>
+          <button className="mv-btn" onClick={onClose}>Close</button>
+        </div>
+        {error && <p className="mv-err" role="alert">{error}</p>}
+        {notice && <p className="mv-muted" role="status">{notice}</p>}
+
+        {loading ? <p className="mv-muted">Loading…</p> : targets.length === 0 ? <p className="mv-muted">No competitor URLs tracked yet.</p> : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 8 }}>
+            {targets.map((t) => (
+              <li key={t.id} className="mv-row" style={{ justifyContent: "space-between" }}>
+                <div style={{ minWidth: 0 }}>
+                  <strong>{t.competitorName}</strong> <span className="mv-muted">{money(t.lastPriceCents)}</span>
+                  <div className="mv-muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360 }}>{t.url}</div>
+                </div>
+                <div className="mv-row">
+                  <button className="mv-btn" disabled={busy === t.id || t.complianceStatus === "manual_only"} onClick={() => checkNow(t)}>Check price now</button>
+                  <button className="mv-btn" disabled={busy === t.id} onClick={() => remove(t)}>Remove</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <CompetitorUrlInput value={pending} onChange={setPending} searchHint={title} />
+        <div className="mv-row" style={{ justifyContent: "flex-end" }}>
+          <button className="mv-btn primary" disabled={!pending.length || busy === "save"} onClick={savePending}>
+            {busy === "save" ? "Saving…" : `Save ${pending.length || ""} competitor URL${pending.length === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/inventory/CompetitorUrlInput.tsx ===
+import { useState } from "react";
+import { mv } from "../../lib/mv";
+import CompetitorSearchBar, { type Listing } from "./CompetitorSearchBar";
+
+export interface CompetitorEntry { competitorName: string; url: string }
+
+/** Persist entries once the product exists (idempotent: re-saving the same URL is a no-op). */
+export async function saveCompetitorTargets(variantId: string, entries: CompetitorEntry[]) {
+  await Promise.all(entries.map((e) => mv("POST", "/api/competitors", { variantId, ...e })));
+}
+
+export default function CompetitorUrlInput({ value, onChange, searchHint = "" }: {
+  value: CompetitorEntry[]; onChange: (v: CompetitorEntry[]) => void; searchHint?: string;
+}) {
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function add(entry: CompetitorEntry): boolean {
+    try {
+      const u = new URL(entry.url);
+      if (!/^https?:$/.test(u.protocol)) throw new Error();
+    } catch { setError("Enter a full product URL starting with http:// or https://"); return false; }
+    if (value.some((v) => v.url === entry.url)) { setError("That URL is already tracked."); return false; }
+    setError(null);
+    onChange([...value, entry]);
+    return true;
+  }
+
+  function addManual() {
+    if (add({ competitorName: name.trim(), url: url.trim() })) { setUrl(""); setName(""); }
+  }
+  const onEnter = (e: React.KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); if (url.trim()) addManual(); } };
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <label style={{ fontWeight: 600 }}>Competitor target URLs</label>
+      <div className="mv-row">
+        <input className="mv-input" style={{ flex: "0 1 150px" }} placeholder="Competitor" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onEnter} />
+        <input className="mv-input" style={{ flex: 1, minWidth: 160 }} placeholder="https://competitor.com/product" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={onEnter} />
+        <button type="button" className="mv-btn" onClick={addManual} disabled={!url.trim()}>Add</button>
+      </div>
+      {error && <p className="mv-err" role="alert">{error}</p>}
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+        {value.map((v) => (
+          <li key={v.url} className="mv-row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {v.competitorName || new URL(v.url).hostname} <span className="mv-muted">{v.url}</span>
+            </span>
+            <button type="button" className="mv-btn" onClick={() => onChange(value.filter((x) => x.url !== v.url))} aria-label={`Remove ${v.url}`}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      <button type="button" className="mv-btn" onClick={() => setShowSearch((s) => !s)} aria-expanded={showSearch}>
+        {showSearch ? "Hide market search" : "Find competitor listings"}
+      </button>
+      {showSearch && <CompetitorSearchBar initialQuery={searchHint} trackedUrls={value.map((v) => v.url)} onTrack={(l: Listing) => add({ competitorName: l.merchant, url: l.url })} />}
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/procurement/ProcurementAdvisorTable.tsx ===
+import { money } from "../../lib/mv";
+
+export interface AdvisorRow {
+  variantId: string; sku: string; name: string; stock: number; capacity: number; stockPct: number;
+  costCents: number; marketCents: number | null; marginPct: number | null; daysOfCover: number | null;
+  tag: "RESTOCK_NOW" | "OPPORTUNITY_BUY" | "HOLD" | "LIQUIDATE"; reason: string; suggestedQty: number;
+}
+
+const LABEL = { RESTOCK_NOW: "Restock now", OPPORTUNITY_BUY: "Opportunity buy", HOLD: "Hold / don't buy", LIQUIDATE: "Liquidate / markdown" } as const;
+
+export default function ProcurementAdvisorTable({ rows, onCreatePo }: { rows: AdvisorRow[]; onCreatePo: (r: AdvisorRow) => void }) {
+  if (!rows.length) {
+    return <div className="card" style={{ color: "var(--slate)" }}>No products yet. Add inventory and competitor URLs to get recommendations.</div>;
+  }
+  return (
+    <div className="card" style={{ overflowX: "auto" }}>
+      <table>
+        <thead>
+          <tr><th>Product / SKU</th><th>Stock</th><th>Market vs cost</th><th>Recommendation</th><th></th></tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const actionable = r.tag === "RESTOCK_NOW" || r.tag === "OPPORTUNITY_BUY";
+            return (
+              <tr key={r.variantId}>
+                <td><div style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</div><div style={{ fontSize: 11, color: "var(--slate)" }}>{r.sku}</div></td>
+                <td style={{ minWidth: 130 }}>
+                  <div className="mv-bar" style={{ marginBottom: 4 }}><span style={{ width: `${Math.min(r.stockPct, 100)}%` }} /></div>
+                  <span style={{ fontSize: 12, color: "var(--slate)" }}>{r.stockPct.toFixed(0)}% · {r.stock}/{r.capacity}</span>
+                </td>
+                <td style={{ fontSize: 13 }}>
+                  {money(r.marketCents)} <span style={{ color: "var(--slate)" }}>vs {money(r.costCents)}</span>
+                  <div style={{ fontSize: 12, color: "var(--slate)" }}>{r.marginPct == null ? "No market price yet" : `${r.marginPct.toFixed(0)}% margin`}</div>
+                </td>
+                <td style={{ maxWidth: 320 }}>
+                  <span className={`mv-badge ${r.tag}`}>{LABEL[r.tag]}</span>
+                  <div style={{ fontSize: 12, color: "var(--slate)", marginTop: 4 }}>{r.reason}</div>
+                </td>
+                <td>
+                  {actionable && <button className="btn primary" style={{ fontSize: 12 }} onClick={() => onCreatePo(r)}>Create PO ({r.suggestedQty})</button>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+=== apps/web/src/components/procurement/ProcurementSummaryCards.tsx ===
+import { money } from "../../lib/mv";
+
+export interface Summary {
+  criticalRestocks: number; opportunityCount: number; opportunityCapitalCents: number;
+  overstockCount: number; overstockValueCents: number;
+}
+
+export default function ProcurementSummaryCards({ summary }: { summary: Summary }) {
+  const cards = [
+    { label: "Critical restocks", value: String(summary.criticalRestocks), note: "Below reorder point and still selling", tag: "RESTOCK_NOW" },
+    { label: "Capital opportunities", value: money(summary.opportunityCapitalCents), note: `${summary.opportunityCount} products with strong market margin`, tag: "OPPORTUNITY_BUY" },
+    { label: "Overstock risk", value: money(summary.overstockValueCents), note: `${summary.overstockCount} products to mark down`, tag: "LIQUIDATE" },
+  ];
+  return (
+    <div className="mv-grid">
+      {cards.map((c) => (
+        <div key={c.label} className="card">
+          <span className={`mv-badge ${c.tag}`}>{c.label}</span>
+          <p style={{ fontSize: 26, margin: "10px 0 2px", fontWeight: 700 }}>{c.value}</p>
+          <p style={{ margin: 0, fontSize: 13, color: "var(--slate)" }}>{c.note}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+=== apps/web/src/pages/Inventory.tsx ===
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ApiError,
+  CATEGORIES,
+  apiJson,
+  formatCents,
+  statusFor,
+  type InventoryLevel,
+  type Location,
+  type ProductDraft,
+} from "../types/inventory";
+import { CSVUploader } from "../components/CSVUploader";
+import CompetitorTargetsModal from "../components/inventory/CompetitorTargetsModal";
+import { saveCompetitorTargets, type CompetitorEntry } from "../components/inventory/CompetitorUrlInput";
+import { ProductFormModal, primaryButtonStyle, secondaryButtonStyle } from "../components/ProductFormModal";
+
+const BORDER = "var(--mv-border, rgba(255,255,255,0.12))";
+const MUTED = "var(--mv-muted, #8fa396)";
+const STATUS_COLOR = { healthy: "#3fae7a", low: "#d9a441", critical: "#e5735f" } as const;
+
+const fieldStyle: React.CSSProperties = {
+  background: "var(--mv-field, #0c120f)",
+  color: "var(--mv-text, #e8efe9)",
+  border: `1px solid ${BORDER}`,
+  borderRadius: 6,
+  padding: "8px 10px",
+};
+
+export default function Inventory() {
+  const [levels, setLevels] = useState<InventoryLevel[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("all");
+  const [locationFilter, setLocationFilter] = useState("all");
+
+  const [showAdd, setShowAdd] = useState(false);
+  const [showCSV, setShowCSV] = useState(false);
+  const [editing, setEditing] = useState<InventoryLevel | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [tracking, setTracking] = useState<InventoryLevel | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [lv, loc] = await Promise.all([
+        apiJson<InventoryLevel[]>("/api/inventory/levels"),
+        apiJson<Location[]>("/api/inventory/locations"),
+      ]);
+      setLevels(lv);
+      setLocations(loc);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load inventory.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const existingSkus = useMemo(() => new Set(levels.map((l) => l.sku)), [levels]);
+  const categories = useMemo(() => [...new Set([...CATEGORIES, ...levels.map((l) => l.category)])], [levels]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return levels.filter(
+      (l) =>
+        (category === "all" || l.category === category) &&
+        (locationFilter === "all" || l.location_id === locationFilter) &&
+        (!q || l.sku.toLowerCase().includes(q) || l.product_name.toLowerCase().includes(q))
+    );
+  }, [levels, search, category, locationFilter]);
+
+  // The create endpoint's response shape isn't relied on: look the new variant up by SKU.
+  async function attachCompetitors(sku: string, entries: CompetitorEntry[]) {
+    try {
+      const fresh = await apiJson<InventoryLevel[]>("/api/inventory/levels");
+      const match = fresh.find((l) => l.sku === sku);
+      if (!match) throw new Error("couldn't find the new product");
+      await saveCompetitorTargets(match.variant_id, entries);
+    } catch (e) {
+      setNotice(`Product saved, but competitor URLs weren't: ${(e as Error).message}. Use the Competitors button to retry.`);
+    }
+  }
+
+  async function createProduct(draft: ProductDraft, competitors: CompetitorEntry[] = []): Promise<string | null> {
+    try {
+      await apiJson("/api/products", { method: "POST", body: JSON.stringify(draft) });
+      if (competitors.length) await attachCompetitors(draft.sku, competitors);
+      await load();
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : "Could not add product.";
+    }
+  }
+
+  async function updateProduct(level: InventoryLevel, draft: ProductDraft, competitors: CompetitorEntry[] = []): Promise<string | null> {
+    try {
+      await apiJson(`/api/products/${level.variant_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sku: draft.sku, name: draft.name, category: draft.category, cost_cents: draft.cost_cents }),
+      });
+      if (competitors.length) await saveCompetitorTargets(level.variant_id, competitors);
+      await load();
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : "Could not save changes.";
+    }
+  }
+
+  async function removeProduct(level: InventoryLevel) {
+    try {
+      await apiJson(`/api/products/${level.variant_id}`, { method: "DELETE" });
+      setConfirmDelete(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError || e instanceof Error ? e.message : "Could not delete.");
+    }
+  }
+
+  async function saveLevel(level: InventoryLevel, patch: { quantity?: number; reorder_level?: number }) {
+    const prev = levels;
+    setLevels((ls) => ls.map((l) => (l.id === level.id ? { ...l, ...patch } : l)));
+    try {
+      await apiJson(`/api/inventory/levels/${level.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    } catch (e) {
+      setLevels(prev);
+      setError(e instanceof Error ? e.message : "Could not update stock.");
+    }
+  }
+
+  return (
+    <div className="app-content">
+      <div className="page-header">
+        <div>
+          <h1>Inventory</h1>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={secondaryButtonStyle} onClick={() => setShowCSV((v) => !v)}>Import CSV</button>
+          <button type="button" style={primaryButtonStyle} onClick={() => setShowAdd(true)}>Add product</button>
+        </div>
+      </div>
+
+      {notice && <p role="status" style={{ color: "var(--mv-accent, #3fae7a)" }}>{notice}</p>}
+      {error && <p role="alert" style={{ color: "var(--mv-danger, #e5735f)" }}>{error}</p>}
+
+      {showCSV && (
+        <div style={{ border: `1px solid ${BORDER}`, borderRadius: 10, padding: 20, marginBottom: 20 }}>
+          <CSVUploader
+            existingSkus={existingSkus}
+            locations={locations}
+            onDone={(n) => {
+              setShowCSV(false);
+              setNotice(`Imported ${n} product${n === 1 ? "" : "s"}.`);
+              void load();
+            }}
+          />
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <input
+          type="search"
+          placeholder="Search SKU or name"
+          aria-label="Search SKU or name"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ ...fieldStyle, minWidth: 240 }}
+        />
+        <select aria-label="Filter by category" value={category} onChange={(e) => setCategory(e.target.value)} style={fieldStyle}>
+          <option value="all">All categories</option>
+          {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        {locations.length > 1 && (
+          <select aria-label="Filter by location" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)} style={fieldStyle}>
+            <option value="all">All locations</option>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        )}
+      </div>
+
+      {loading ? (
+        <p style={{ color: MUTED }}>Loading…</p>
+      ) : filtered.length === 0 ? (
+        <p style={{ color: MUTED }}>{levels.length === 0 ? "No products yet." : "No products match these filters."}</p>
+      ) : (
+        <div style={{ overflowX: "auto", border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: MUTED }}>
+                {["SKU", "Product", "Category", "Location", "Cost", "Stock", "Reorder at", "Status", ""].map((h) => (
+                  <th key={h} style={{ padding: "10px 12px", fontWeight: 500 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((l) => {
+                const status = statusFor(l);
+                return (
+                  <tr key={l.id} style={{ borderTop: `1px solid ${BORDER}` }}>
+                    <td style={cell}>{l.sku}</td>
+                    <td style={cell}>{l.product_name}</td>
+                    <td style={cell}>{l.category}</td>
+                    <td style={cell}>{l.location_name}</td>
+                    <td style={{ ...cell, fontVariantNumeric: "tabular-nums" }}>{formatCents(l.cost)}</td>
+                    <td style={cell}><NumberCell value={l.quantity} label={`Stock for ${l.sku}`} onCommit={(n) => saveLevel(l, { quantity: n })} /></td>
+                    <td style={cell}><NumberCell value={l.reorder_level} label={`Reorder level for ${l.sku}`} onCommit={(n) => saveLevel(l, { reorder_level: n })} /></td>
+                    <td style={cell}>
+                      <span style={{ color: STATUS_COLOR[status] }}>● {status === "healthy" ? "Healthy" : status === "low" ? "Low" : "Out of stock"}</span>
+                    </td>
+                    <td style={{ ...cell, whiteSpace: "nowrap", textAlign: "right" }}>
+                      {confirmDelete === l.id ? (
+                        <>
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px", color: "#e5735f" }} onClick={() => removeProduct(l)}>Confirm delete</button>{" "}
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setConfirmDelete(null)}>Cancel</button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setTracking(l)}>Competitors</button>{" "}
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setEditing(l)}>Edit</button>{" "}
+                          <button type="button" style={{ ...secondaryButtonStyle, padding: "4px 10px" }} onClick={() => setConfirmDelete(l.id)}>Delete</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showAdd && <ProductFormModal mode="add" locations={locations} onClose={() => setShowAdd(false)} onSubmit={createProduct} />}
+      {editing && (
+        <ProductFormModal mode="edit" initial={editing} locations={locations} onClose={() => setEditing(null)} onSubmit={(d, c) => updateProduct(editing, d, c)} />
+      )}
+      {tracking && (
+        <CompetitorTargetsModal variantId={tracking.variant_id} title={tracking.product_name} onClose={() => setTracking(null)} />
+      )}
+    </div>
+  );
+}
+
+const cell: React.CSSProperties = { padding: "10px 12px", verticalAlign: "middle" };
+
+/** Number input that commits on blur/Enter only when the value actually changed and is a valid whole number. */
+function NumberCell({ value, label, onCommit }: { value: number; label: string; onCommit: (n: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+
+  function commit() {
+    if (!/^\d+$/.test(draft)) return setDraft(String(value));
+    const n = Number(draft);
+    if (n !== value) onCommit(n);
+  }
+  return (
+    <input
+      aria-label={label}
+      inputMode="numeric"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      style={{ ...fieldStyle, width: 72, padding: "4px 8px", fontVariantNumeric: "tabular-nums" }}
+    />
+  );
+}
+
+
+=== apps/web/src/pages/Procurement.tsx ===
+import { SkeletonRows } from "../components/Skeleton";
+import { CSSProperties, FormEvent, useEffect, useState } from "react";
+import { api } from "../api/client";
+import ProcurementSummaryCards, { type Summary } from "../components/procurement/ProcurementSummaryCards";
+import ProcurementAdvisorTable, { type AdvisorRow } from "../components/procurement/ProcurementAdvisorTable";
+import "../styles/modules.css";
+
+interface Suggestion {
+  id: string;
+  product_variant_id: string;
+  sku: string;
+  name: string;
+  location_name: string;
+  location_id: string;
+  suggested_quantity: number;
+  reason: { daysOfCover: number | null; belowReorderPoint: boolean; leadTimeDays: number };
+  status: string;
+  unit_cost_cents?: number; // set for advisor rows; DB suggestions don't carry a cost
+}
+
+interface Supplier {
+  id: string;
+  name: string;
+  contact_email: string | null;
+  default_lead_time_days: number;
+}
+
+interface Location {
+  id: string;
+  name: string;
+}
+
+interface PoModalProps {
+  suggestion: Suggestion;
+  suppliers: Supplier[];
+  locations: Location[];
+  onClose: () => void;
+  onCreated: () => void;
+}
+
+function PoModal({ suggestion, suppliers, locations, onClose, onCreated }: PoModalProps) {
+  const [supplierId, setSupplierId] = useState(suppliers[0]?.id ?? "");
+  const [locationId, setLocationId] = useState(suggestion.location_id || (locations[0]?.id ?? ""));
+  const [quantity, setQuantity] = useState(suggestion.suggested_quantity);
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!supplierId) { setError("Select a supplier first."); return; }
+    if (!locationId) { setError("Select a destination location."); return; }
+    setError(null);
+    setCreating(true);
+    try {
+      await api.post<{ purchaseOrderId: string }>("/procurement/purchase-orders", {
+        suggestionId: suggestion.id || undefined, // advisor rows have no DB suggestion
+        supplierId,
+        locationId,
+        items: [
+          {
+            productVariantId: suggestion.product_variant_id,
+            quantityOrdered: quantity,
+            unitCostCents: suggestion.unit_cost_cents ?? 0, // 0 when unknown; edit on the PO
+          },
+        ],
+      });
+      onCreated();
+      onClose();
+    } catch (err: any) {
+      setError(err.message ?? "Could not create purchase order.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+    }}>
+      <div className="card" style={{ width: "100%", maxWidth: 440, padding: "28px 28px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Create Purchase Order</div>
+            <div style={{ color: "var(--slate)", fontSize: 13, marginTop: 2 }}>{suggestion.name} · {suggestion.sku}</div>
+          </div>
+          <button className="btn" style={{ border: "none", fontSize: 16 }} onClick={onClose}>×</button>
+        </div>
+
+        {error && (
+          <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "8px 12px", fontSize: 13, marginBottom: 14 }}>
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Supplier</label>
+            {suppliers.length === 0 ? (
+              <p style={{ fontSize: 13, color: "var(--warning)" }}>
+                No suppliers set up yet. Add one in Settings → Suppliers first.
+              </p>
+            ) : (
+              <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)} style={selectStyle} required>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.default_lead_time_days ? ` · ${s.default_lead_time_days}d lead` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Ship to location</label>
+            <select value={locationId} onChange={(e) => setLocationId(e.target.value)} style={selectStyle} required>
+              {locations.map((l) => (
+                <option key={l.id} value={l.id}>{l.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Quantity</label>
+            <input
+              type="number"
+              min={1}
+              value={quantity}
+              onChange={(e) => setQuantity(Number(e.target.value))}
+              style={selectStyle}
+              required
+            />
+            <div style={{ fontSize: 11, color: "var(--slate)", marginTop: 4 }}>
+              Suggested: {suggestion.suggested_quantity}{suggestion.reason.leadTimeDays ? ` · Lead time: ${suggestion.reason.leadTimeDays}d` : ""}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+            <button type="submit" className="btn primary" disabled={creating || suppliers.length === 0} style={{ fontSize: 13 }}>
+              {creating ? "Creating…" : "Create draft PO"}
+            </button>
+            <button type="button" className="btn" onClick={onClose} style={{ fontSize: 13 }}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+export function Procurement() {
+  const [rows, setRows] = useState<Suggestion[] | null>(null);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [modal, setModal] = useState<Suggestion | null>(null);
+  const [advisor, setAdvisor] = useState<{ items: AdvisorRow[]; summary: Summary } | null>(null);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
+
+  function loadAdvisor() {
+    api
+      .get<{ items: AdvisorRow[]; summary: Summary }>("/procurement/recommendations")
+      .then((d) => { setAdvisor(d); setAdvisorError(null); })
+      .catch(() => setAdvisorError("Could not load market recommendations."));
+  }
+
+  // An advisor row opens the same PO modal as a reorder alert, pre-filled with the unit cost.
+  function openAdvisorPo(r: AdvisorRow) {
+    setModal({
+      id: "",
+      product_variant_id: r.variantId,
+      sku: r.sku,
+      name: r.name,
+      location_name: "",
+      location_id: "",
+      suggested_quantity: r.suggestedQty,
+      unit_cost_cents: r.costCents,
+      reason: { daysOfCover: r.daysOfCover == null ? null : Math.round(r.daysOfCover), belowReorderPoint: r.tag === "RESTOCK_NOW", leadTimeDays: 0 },
+      status: "open",
+    });
+  }
+
+  function load() {
+    api
+      .get<Suggestion[]>("/procurement/suggestions")
+      .then(setRows)
+      .catch(() => setError("Could not load procurement suggestions."));
+  }
+
+  useEffect(() => {
+    load();
+    loadAdvisor();
+    api.get<Supplier[]>("/suppliers").then(setSuppliers).catch(() => {});
+    api.get<Location[]>("/admin/locations").then(setLocations).catch(() => {});
+  }, []);
+
+  function handleCreated() {
+    setSuccess("Purchase order created as draft.");
+    setTimeout(() => setSuccess(null), 3000);
+    load();
+    loadAdvisor();
+  }
+
+  return (
+    <div>
+      {modal && (
+        <PoModal
+          suggestion={modal}
+          suppliers={suppliers}
+          locations={locations}
+          onClose={() => setModal(null)}
+          onCreated={handleCreated}
+        />
+      )}
+
+      <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Procurement suggestions</h1>
+      {error && (
+        <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
+          {error}
+        </div>
+      )}
+      {success && (
+        <div style={{ background: "#EAF3EC", color: "var(--success)", border: "1px solid var(--success)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
+          {success}
+        </div>
+      )}
+
+      {suppliers.length === 0 && rows && rows.length > 0 && (
+        <div style={{ background: "#FBF0E4", color: "var(--warning)", border: "1px solid var(--warning)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
+          ⚠ No suppliers set up yet — go to <strong>Settings → Suppliers</strong> to add one before creating a PO.
+        </div>
+      )}
+
+      <h2 style={{ fontSize: 17, margin: "20px 0 10px" }}>Market advisor</h2>
+      {advisorError && (
+        <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 12px", fontSize: 13, marginBottom: 16 }}>
+          {advisorError}
+        </div>
+      )}
+      {advisor === null && !advisorError && <SkeletonRows rows={3} />}
+      {advisor && (
+        <div style={{ display: "grid", gap: 12, marginBottom: 8 }}>
+          <ProcurementSummaryCards summary={advisor.summary} />
+          <ProcurementAdvisorTable rows={advisor.items} onCreatePo={openAdvisorPo} />
+        </div>
+      )}
+
+      <h2 style={{ fontSize: 17, margin: "24px 0 10px" }}>Reorder alerts</h2>
+      <div className="card">
+        {!error && rows === null && <SkeletonRows rows={5} />}
+        {rows?.length === 0 && <p style={{ color: "var(--slate)" }}>No open suggestions right now.</p>}
+        {rows && rows.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Product / SKU</th>
+                <th>Location</th>
+                <th>Days of cover</th>
+                <th>Reason</th>
+                <th>Qty suggested</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</div>
+                    <div style={{ fontSize: 11, color: "var(--slate)" }}>{r.sku}</div>
+                  </td>
+                  <td style={{ fontSize: 13, color: "var(--slate)" }}>{r.location_name}</td>
+                  <td>
+                    <span style={{
+                      fontWeight: 700,
+                      color: r.reason.daysOfCover === null ? "var(--slate)"
+                        : r.reason.daysOfCover <= 3 ? "var(--critical)"
+                        : r.reason.daysOfCover <= 7 ? "var(--warning)"
+                        : "var(--ink)",
+                    }}>
+                      {r.reason.daysOfCover ?? "—"}d
+                    </span>
+                  </td>
+                  <td style={{ color: "var(--slate)", fontSize: 12 }}>
+                    Below reorder point · {r.reason.leadTimeDays}d lead time
+                  </td>
+                  <td style={{ fontSize: 13 }}>{r.suggested_quantity}</td>
+                  <td>
+                    <button className="btn primary" style={{ fontSize: 12 }} onClick={() => setModal(r)}>
+                      Create PO
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const fieldStyle: CSSProperties = { marginBottom: 14 };
+const labelStyle: CSSProperties = { display: "block", fontSize: 13, fontWeight: 600, marginBottom: 5 };
+const selectStyle: CSSProperties = {
+  width: "100%",
+  border: "1px solid var(--hairline)",
+  borderRadius: 6,
+  padding: "8px 10px",
+  fontSize: 14,
+  background: "var(--paper)",
+  color: "var(--ink)",
+};
+
+
+=== apps/web/src/pages/Billing.tsx ===
+import { SkeletonRows } from "../components/Skeleton";
+import { useEffect, useState } from "react";
+import { api } from "../api/client";
+import OrgBillingOverview from "../components/billing/OrgBillingOverview";
+import "../styles/modules.css";
+
+interface PlanUsage {
+  planName: string;
+  trackedSourcesUsed: number;
+  trackedSourcesIncluded: number | null;
+  nudge: { level: "none" | "approaching" | "over"; message: string } | null;
+  trialActivatedAt: string | null;
+  status: string;
+}
+
+export function Billing() {
+  const [usage, setUsage] = useState<PlanUsage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<PlanUsage>("/billing/usage")
+      .then(setUsage)
+      .catch(() => setError("Could not load your plan usage."));
+  }, []);
+
+  if (error) return <p style={{ color: "var(--critical)" }}>{error}</p>;
+  if (!usage) return <SkeletonRows rows={5} />;
+
+  const pct =
+    usage.trackedSourcesIncluded !== null
+      ? Math.min(100, Math.round((usage.trackedSourcesUsed / usage.trackedSourcesIncluded) * 100))
+      : null;
+
+  return (
+    <div>
+      <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Billing</h1>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <strong>{usage.planName}</strong>
+        <p style={{ color: "var(--slate)", fontSize: 13, margin: "4px 0 0" }}>
+          Status: {usage.status === "trialing" ? "Trial" : usage.status}
+          {usage.status === "trialing" && !usage.trialActivatedAt && (
+            <> · your trial clock starts once your first tracked source successfully returns a price</>
+          )}
+        </p>
+      </div>
+
+      <div className="card">
+        <strong>Tracked competitor sources</strong>
+        <p style={{ fontSize: 26, fontWeight: 700, margin: "8px 0" }}>
+          {usage.trackedSourcesUsed}
+          {usage.trackedSourcesIncluded !== null && (
+            <span style={{ fontSize: 15, color: "var(--slate)", fontWeight: 400 }}>
+              {" "}
+              of {usage.trackedSourcesIncluded} included
+            </span>
+          )}
+        </p>
+        {pct !== null && (
+          <div
+            style={{
+              height: 6,
+              borderRadius: 3,
+              background: "var(--hairline)",
+              overflow: "hidden",
+              marginBottom: 12,
+            }}
+          >
+            <div
+              style={{
+                width: `${pct}%`,
+                height: "100%",
+                background: usage.nudge?.level === "over" ? "var(--critical)" : "var(--accent)",
+              }}
+            />
+          </div>
+        )}
+        {usage.nudge && (
+          <p
+            style={{
+              fontSize: 13,
+              color: usage.nudge.level === "over" ? "var(--critical)" : "var(--warning)",
+              margin: 0,
+            }}
+          >
+            {usage.nudge.message}
+          </p>
+        )}
+        {!usage.nudge && usage.trackedSourcesIncluded !== null && (
+          <p style={{ fontSize: 13, color: "var(--slate)", margin: 0 }}>Well within your plan's included volume.</p>
+        )}
+      </div>
+
+      <h2 style={{ fontSize: 18, margin: "28px 0 12px" }}>Scraping credits and plans</h2>
+      <OrgBillingOverview />
+    </div>
+  );
+}
+
+
+=== apps/web/src/pages/SignUp.tsx ===
+import { CSSProperties, FormEvent, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
+import WorkspaceChoice, { type WorkspaceValue } from "../components/billing/WorkspaceChoice";
+import "../styles/modules.css";
+
+export function SignUp() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+
+  const [ws, setWs] = useState<WorkspaceValue>({ mode: "create", orgName: "", inviteCode: "" });
+  const [notice, setNotice] = useState<string | null>(null);
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [tosAccepted, setTosAccepted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!tosAccepted) {
+      setError("You must accept the Terms of Service to create an account.");
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await api.post<{ token?: string; pending?: boolean; message?: string }>("/onboarding/register", {
+        fullName,
+        email,
+        password,
+        acceptTos: true,
+        mode: ws.mode,
+        orgName: ws.orgName,
+        inviteCode: ws.inviteCode,
+      });
+      if (res.pending) {
+        setNotice(res.message ?? "Request sent. A workspace owner needs to approve your access.");
+        return;
+      }
+      login(res.token!);
+      navigate("/app", { replace: true });
+    } catch (err: any) {
+      setError(cleanMessage(err.message));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={pageStyle}>
+      <div style={cardStyle}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "var(--accent)", marginBottom: 4 }}>
+            Marginview
+          </div>
+          <div style={{ color: "var(--slate)", fontSize: 13 }}>
+            Create your account — free 14-day trial, no card required
+          </div>
+        </div>
+
+        {error && <div style={errorBannerStyle}>{error}</div>}
+        {notice && <div role="status" style={noticeStyle}>{notice}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div style={fieldStyle}>
+            <WorkspaceChoice value={ws} onChange={setWs} />
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Your full name</label>
+            <input
+              type="text"
+              required
+              autoComplete="name"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              style={inputStyle}
+              placeholder="Jane Smith"
+            />
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Work email</label>
+            <input
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={inputStyle}
+              placeholder="jane@acme.com"
+            />
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Password (min 8 characters)</label>
+            <input
+              type="password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={inputStyle}
+              placeholder="Create a strong password"
+            />
+          </div>
+
+          <div style={{ marginBottom: 20, display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <input
+              id="tos"
+              type="checkbox"
+              checked={tosAccepted}
+              onChange={(e) => setTosAccepted(e.target.checked)}
+              style={{ marginTop: 2, flexShrink: 0 }}
+            />
+            <label htmlFor="tos" style={{ fontSize: 13, color: "var(--slate)", cursor: "pointer" }}>
+              I agree to the{" "}
+              <Link to="/terms" target="_blank" style={{ color: "var(--accent)" }}>
+                Terms of Service
+              </Link>{" "}
+              and{" "}
+              <Link to="/privacy" target="_blank" style={{ color: "var(--accent)" }}>
+                Privacy Policy
+              </Link>
+              . Acceptance is recorded against this account.
+            </label>
+          </div>
+
+          <button
+            type="submit"
+            className="btn primary"
+            disabled={loading}
+            style={{ width: "100%", padding: "10px 0", fontSize: 14 }}
+          >
+            {loading ? "Creating account…" : "Create free account"}
+          </button>
+        </form>
+
+        <div style={{ textAlign: "center", marginTop: 20, fontSize: 13, color: "var(--slate)" }}>
+          Already have an account?{" "}
+          <Link to="/login" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+            Sign in
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const pageStyle: CSSProperties = {
+  minHeight: "100vh",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--paper)",
+  padding: "16px",
+};
+
+const cardStyle: CSSProperties = {
+  background: "var(--card)",
+  border: "1px solid var(--hairline)",
+  borderRadius: "var(--radius)",
+  padding: "36px 32px",
+  width: "100%",
+  maxWidth: 440,
+};
+
+const fieldStyle: CSSProperties = { marginBottom: 16 };
+
+const labelStyle: CSSProperties = {
+  display: "block",
+  fontSize: 13,
+  fontWeight: 600,
+  marginBottom: 5,
+  color: "var(--ink)",
+};
+
+const inputStyle: CSSProperties = {
+  width: "100%",
+  border: "1px solid var(--hairline)",
+  borderRadius: 6,
+  padding: "9px 11px",
+  fontSize: 14,
+  background: "var(--paper)",
+  color: "var(--ink)",
+  outline: "none",
+};
+
+const errorBannerStyle: CSSProperties = {
+  background: "#FBEAE7",
+  color: "var(--critical)",
+  border: "1px solid var(--critical)",
+  borderRadius: 6,
+  padding: "10px 12px",
+  fontSize: 13,
+  marginBottom: 16,
+};
+
+const noticeStyle: CSSProperties = {
+  background: "var(--card)",
+  color: "var(--ink)",
+  border: "1px solid var(--accent)",
+  borderRadius: 6,
+  padding: "10px 12px",
+  fontSize: 13,
+  marginBottom: 16,
+};
+
+// api/client.ts stringifies error bodies, so a plain message arrives wrapped in quotes.
+function cleanMessage(m?: string): string {
+  if (!m) return "Sign up failed. Please try again.";
+  try {
+    const v = JSON.parse(m);
+    if (typeof v === "string") return v;
+  } catch {
+    /* not JSON, use as-is */
+  }
+  return m;
+}
+
+
+=== apps/web/src/lib/mv.ts ===
+import { useCallback, useEffect, useState } from "react";
+import { apiJson } from "../types/inventory"; // your existing authenticated fetch helper
+
+export function mv<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+  return apiJson<T>(path, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+}
+
+export function useMv<T>(path: string | null) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(!!path);
+  const load = useCallback(() => {
+    if (!path) return;
+    setLoading(true);
+    mv<T>("GET", path).then((d) => { setData(d); setError(null); }).catch((e: Error) => setError(e.message)).finally(() => setLoading(false));
+  }, [path]);
+  useEffect(load, [load]);
+  return { data, error, loading, reload: load };
+}
+
+export const money = (cents: number | null | undefined) =>
+  cents == null ? "-" : (cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" });
+
+
+=== apps/web/src/styles/modules.css ===
+:root{
+  --m-surface:var(--card,#fff);--m-border:var(--hairline,#e3e5ea);--m-text:var(--ink,#101828);
+  --m-muted:var(--slate,#667085);--m-accent:var(--accent,#2563eb);--m-danger:var(--critical,#b42318);--m-bg:var(--paper,#f8f9fb);
+}
+.mv-card{background:var(--m-surface);border:1px solid var(--m-border);border-radius:var(--radius,10px);padding:20px;color:var(--m-text)}
+.mv-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.mv-muted{color:var(--m-muted);font-size:.875rem}
+.mv-bar{height:10px;border-radius:99px;background:var(--m-border);overflow:hidden}
+.mv-bar>span{display:block;height:100%;background:var(--m-accent)}
+.mv-bar.warn>span{background:var(--warning,#d97706)}.mv-bar.bad>span{background:var(--m-danger)}
+.mv-btn{border:1px solid var(--m-border);background:var(--m-surface);color:var(--m-text);border-radius:8px;padding:7px 12px;cursor:pointer;font:inherit}
+.mv-btn:hover:not(:disabled){border-color:var(--m-accent)}
+.mv-btn:disabled{opacity:.55;cursor:not-allowed}
+.mv-btn.primary{background:var(--m-accent);border-color:var(--m-accent);color:#fff}
+.mv-input{width:100%;padding:8px 10px;border:1px solid var(--m-border);border-radius:6px;font:inherit;background:var(--m-bg);color:var(--m-text)}
+.mv-err{color:var(--m-danger);font-size:.875rem}
+.mv-table{width:100%;border-collapse:collapse;color:var(--m-text)}
+.mv-table th,.mv-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--m-border);vertical-align:middle}
+.mv-table-wrap{overflow-x:auto}
+.mv-badge{display:inline-block;padding:3px 9px;border-radius:99px;font-size:.78rem;font-weight:600;white-space:nowrap}
+.mv-badge.RESTOCK_NOW{background:#fee4e2;color:#b42318}
+.mv-badge.OPPORTUNITY_BUY{background:#dcfae6;color:#067647}
+.mv-badge.HOLD{background:#eaecf0;color:#344054}
+.mv-badge.LIQUIDATE{background:#fef0c7;color:#b54708}
+.mv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mv-radio{display:flex;gap:10px;padding:12px;border:1px solid var(--m-border);border-radius:8px;cursor:pointer;color:var(--m-text)}
+.mv-radio.on{border-color:var(--m-accent)}
+.mv-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+.mv-modal{background:var(--m-surface);color:var(--m-text);border:1px solid var(--m-border);border-radius:12px;width:100%;max-width:640px;max-height:90vh;overflow:auto;padding:24px;display:grid;gap:16px}
+
+

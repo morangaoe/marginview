@@ -1,11 +1,19 @@
 import { CSSProperties, FormEvent, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 
+/**
+ * FIX: After login, redirect back to the page the user was trying to reach
+ * (set by ProtectedRoute via location state), or fall back to /app.
+ * Previously all logins unconditionally navigated to /app, losing context.
+ */
 export function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = (location.state as any)?.from?.pathname ?? "/app";
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -18,9 +26,9 @@ export function Login() {
     try {
       const { token } = await api.post<{ token: string }>("/auth/login", { email, password });
       login(token);
-      navigate("/app", { replace: true });
+      navigate(from, { replace: true });
     } catch (err: any) {
-      setError(err.message ?? "Login failed. Check your email and password.");
+      setError(cleanMessage(err.message) ?? "Login failed. Check your email and password.");
     } finally {
       setLoading(false);
     }
@@ -33,14 +41,10 @@ export function Login() {
           <div style={{ fontSize: 22, fontWeight: 700, color: "var(--accent)", marginBottom: 4 }}>
             Marginview
           </div>
-          <div style={{ color: "var(--slate)", fontSize: 13 }}>
-            Sign in to your account
-          </div>
+          <div style={{ color: "var(--slate)", fontSize: 13 }}>Sign in to your account</div>
         </div>
 
-        {error && (
-          <div style={errorBannerStyle}>{error}</div>
-        )}
+        {error && <div style={errorBannerStyle}>{error}</div>}
 
         <form onSubmit={handleSubmit}>
           <div style={fieldStyle}>
@@ -90,6 +94,19 @@ export function Login() {
   );
 }
 
+// api/client.ts stringifies error bodies, so a plain message can arrive wrapped in quotes.
+function cleanMessage(m?: string): string | null {
+  if (!m) return null;
+  try {
+    const v = JSON.parse(m);
+    if (typeof v === "string") return v;
+    if (v?.fieldErrors) return "Some fields are invalid. Check your input and try again.";
+  } catch {
+    /* not JSON, use as-is */
+  }
+  return m;
+}
+
 const pageStyle: CSSProperties = {
   minHeight: "100vh",
   display: "flex",
@@ -127,6 +144,7 @@ const inputStyle: CSSProperties = {
   background: "var(--paper)",
   color: "var(--ink)",
   outline: "none",
+  boxSizing: "border-box",
 };
 
 const errorBannerStyle: CSSProperties = {

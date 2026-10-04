@@ -1,0 +1,1489 @@
+r page and pulls out a numeric price.
+ *
+ * Resolution order (TRD section 4, step 3):
+ *  1. CSS selector provided by the user (most precise)
+ *  2. JSON-LD schema.org/Product offers
+ *  3. <meta property="product:price:amount"> (Open Graph commerce)
+ *  4. <meta name="price"> or itemprop="price"
+ *
+ * Returns null when no price can be found with reasonable confidence.
+ */
+
+import * as cheerio from "cheerio";
+
+export interface ExtractResult {
+  priceCents: number | null;
+  currency: string;
+  inStock: boolean | null;
+  rawText: string | null;
+  confidence: "high" | "medium" | "low";
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  "$": "USD",
+  "£": "GBP",
+  "€": "EUR",
+  "¥": "JPY",
+  "₹": "INR",
+  "A$": "AUD",
+  "C$": "CAD",
+};
+
+/**
+ * Parses a price string like "$12.99", "12,99 €", "1,299" into cents.
+ * Returns null when the string does not contain a recognisable number.
+ */
+export function parsePriceText(raw: string): { cents: number; currency: string } | null {
+  const cleaned = raw.trim();
+
+  // Detect currency symbol
+  let detectedCurrency = "USD";
+  for (const [sym, code] of Object.entries(CURRENCY_SYMBOLS)) {
+    if (cleaned.includes(sym)) {
+      detectedCurrency = code;
+      break;
+    }
+  }
+
+  // Strip everything that isn't a digit, comma, or period
+  const digits = cleaned.replace(/[^0-9.,]/g, "");
+  if (!digits) return null;
+
+  // Handle European format (1.234,56) vs standard (1,234.56)
+  let normalized: string;
+  const lastComma = digits.lastIndexOf(",");
+  const lastPeriod = digits.lastIndexOf(".");
+
+  if (lastComma > lastPeriod) {
+    // European: comma is decimal separator
+    normalized = digits.replace(/\./g, "").replace(",", ".");
+  } else {
+    // Standard: period is decimal separator
+    normalized = digits.replace(/,/g, "");
+  }
+
+  const value = parseFloat(normalized);
+  if (isNaN(value) || value <= 0 || value > 1_000_000) return null;
+
+  return { cents: Math.round(value * 100), currency: detectedCurrency };
+}
+
+function tryJsonLd($: cheerio.CheerioAPI): { priceCents: number; currency: string; inStock: boolean | null } | null {
+  const scripts = $('script[type="application/ld+json"]');
+  for (let i = 0; i < scripts.length; i++) {
+    try {
+      const data = JSON.parse($(scripts[i]).html() || "{}");
+      const items: any[] = Array.isArray(data) ? data : [data];
+
+      for (const item of items) {
+        const type = item["@type"];
+        if (type !== "Product" && type !== "IndividualProduct") continue;
+
+        const offers = item.offers || item.Offers;
+        if (!offers) continue;
+
+        const offer = Array.isArray(offers) ? offers[0] : offers;
+        const priceStr = String(offer.price ?? offer.Price ?? "");
+        const currency = (offer.priceCurrency || offer.PriceCurrency || "USD").toUpperCase();
+
+        const parsed = parsePriceText(priceStr);
+        if (!parsed) continue;
+
+        const avail: string = (offer.availability || "").toLowerCase();
+        const inStock = avail.includes("instock")
+          ? true
+          : avail.includes("outofstock")
+          ? false
+          : null;
+
+        return { priceCents: parsed.cents, currency, inStock };
+      }
+    } catch {
+      // Malformed JSON-LD — try the next script tag
+    }
+  }
+  return null;
+}
+
+function tryMetaTags($: cheerio.CheerioAPI): { priceCents: number; currency: string } | null {
+  const candidates = [
+    $('meta[property="product:price:amount"]').attr("content"),
+    $('meta[name="price"]').attr("content"),
+    $('[itemprop="price"]').attr("content") || $('[itemprop="price"]').first().text(),
+    $('meta[property="og:price:amount"]').attr("content"),
+  ];
+
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const parsed = parsePriceText(raw);
+    if (parsed) return { priceCents: parsed.cents, currency: parsed.currency };
+  }
+  return null;
+}
+
+function trySelector($: cheerio.CheerioAPI, selector: string): { priceCents: number; currency: string } | null {
+  const el = $(selector).first();
+  if (!el.length) return null;
+  const text = el.attr("content") || el.text();
+  const parsed = parsePriceText(text || "");
+  if (!parsed) return null;
+  return { priceCents: parsed.cents, currency: parsed.currency };
+}
+
+export async function extractPrice(
+  url: string,
+  cssSelector?: string | null
+): Promise<ExtractResult> {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "MarginviewBot/1.0 (pricing intelligence; contact@marginview.io)",
+      Accept: "text/html,application/xhtml+xml",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    return { priceCents: null, currency: "USD", inStock: null, rawText: null, confidence: "low" };
+  }
+
+  const html = await response.text();
+  const $ = cheerio.load(html);
+
+  // 1. CSS selector (user-supplied — highest trust)
+  if (cssSelector) {
+    const result = trySelector($, cssSelector);
+    if (result) {
+      return {
+        priceCents: result.priceCents,
+        currency: result.currency,
+        inStock: null,
+        rawText: $(cssSelector).first().text().trim(),
+        confidence: "high",
+      };
+    }
+  }
+
+  // 2. JSON-LD schema.org
+  const ld = tryJsonLd($);
+  if (ld) {
+    return {
+      priceCents: ld.priceCents,
+      currency: ld.currency,
+      inStock: ld.inStock,
+      rawText: String(ld.priceCents / 100),
+      confidence: "high",
+    };
+  }
+
+  // 3 & 4. Meta tags / itemprop
+  const meta = tryMetaTags($);
+  if (meta) {
+    return {
+      priceCents: meta.priceCents,
+      currency: meta.currency,
+      inStock: null,
+      rawText: String(meta.priceCents / 100),
+      confidence: "medium",
+    };
+  }
+
+  return { priceCents: null, currency: "USD", inStock: null, rawText: null, confidence: "low" };
+}
+
+
+===== apps/web/package.json =====
+{
+  "name": "@marginview/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.23.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11"
+  }
+}
+
+
+===== apps/web/tsconfig.json =====
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true
+  },
+  "include": ["src"]
+}
+
+
+===== apps/web/vite.config.ts =====
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      "/api": "http://localhost:4000",
+    },
+  },
+});
+
+
+===== apps/web/vercel.json =====
+{
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://marginview-production.up.railway.app/api/:path*" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
+
+===== apps/web/src/main.tsx =====
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import { AuthProvider } from "./auth/AuthContext";
+import { App } from "./App";
+import "./styles/tokens.css";
+import "./styles/layout.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+
+===== apps/web/src/App.tsx =====
+import { Route, Routes } from "react-router-dom";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AppShell } from "./layout/AppShell";
+import { PublicLayout } from "./layout/PublicLayout";
+import { Admin } from "./pages/Admin";
+import { Billing } from "./pages/Billing";
+import { Dashboard } from "./pages/Dashboard";
+import { Demo } from "./pages/Demo";
+import { Home } from "./pages/Home";
+import Inventory from "./pages/Inventory";
+import { Login } from "./pages/Login";
+import { Privacy } from "./pages/Privacy";
+import Pricing from "./pages/Pricing";
+import { PricingList } from "./pages/PricingList";
+import { Procurement } from "./pages/Procurement";
+import { Settings } from "./pages/Settings";
+import { SignUp } from "./pages/SignUp";
+import { Terms } from "./pages/Terms";
+import Reports from "./pages/Reports";
+import Suppliers from "./pages/Suppliers";
+import PurchaseOrders from "./pages/PurchaseOrders";
+import SkuDetail from "./pages/SkuDetail";
+import PriceHistory from "./pages/PriceHistory";
+import CompetitorSources from "./pages/CompetitorSources";
+import Notifications from "./pages/Notifications";
+import Onboarding from "./pages/Onboarding";
+import Contact from "./pages/Contact";
+
+export function App() {
+  return (
+    <Routes>
+      {/* Public pages: minimalist black */}
+      <Route element={<PublicLayout />}>
+        <Route path="/" element={<Home />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<SignUp />} />
+        <Route path="/demo" element={<Demo />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/contact" element={<Contact />} />
+      </Route>
+
+      {/* Authenticated app: glass over nature */}
+      <Route element={<ProtectedRoute />}>
+        <Route element={<AppShell />}>
+          <Route path="/app" element={<Dashboard />} />
+          <Route path="/app/inventory" element={<Inventory />} />
+          <Route path="/app/inventory/:skuId" element={<SkuDetail />} />
+          <Route path="/app/pricing" element={<PricingList />} />
+          <Route path="/app/pricing/:variantId" element={<Pricing />} />
+          <Route path="/app/pricing/:productId/history" element={<PriceHistory />} />
+          <Route path="/app/procurement" element={<Procurement />} />
+          <Route path="/app/procurement/orders" element={<PurchaseOrders />} />
+          <Route path="/app/procurement/suppliers" element={<Suppliers />} />
+          <Route path="/app/reports" element={<Reports />} />
+          <Route path="/app/notifications" element={<Notifications />} />
+          <Route path="/app/onboarding" element={<Onboarding />} />
+          <Route path="/app/billing" element={<Billing />} />
+          <Route path="/app/settings" element={<Settings />} />
+          <Route path="/app/settings/competitor-sources" element={<CompetitorSources />} />
+          <Route path="/app/admin" element={<Admin />} />
+        </Route>
+      </Route>
+    </Routes>
+  );
+}
+
+===== apps/web/src/api/client.ts =====
+// In production, set VITE_API_URL to your deployed API's full origin
+// (e.g. https://marginview-api.up.railway.app). Locally this stays
+// unset and falls back to the relative "/api" path, which Vite's
+// dev server proxies to http://localhost:4000 (see vite.config.ts).
+const API_ORIGIN = import.meta.env.VITE_API_URL || "";
+const BASE = `${API_ORIGIN}/api`;
+
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem("mv_token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function handle<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ? JSON.stringify(body.error) : `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+export const api = {
+  get: <T>(path: string) =>
+    fetch(`${BASE}${path}`, { headers: { ...authHeaders() } }).then((r) => handle<T>(r)),
+
+  post: <T>(path: string, body?: unknown) =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }).then((r) => handle<T>(r)),
+
+  patch: <T>(path: string, body?: unknown) =>
+    fetch(`${BASE}${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }).then((r) => handle<T>(r)),
+
+  delete: <T>(path: string) =>
+    fetch(`${BASE}${path}`, {
+      method: "DELETE",
+      headers: { ...authHeaders() },
+    }).then((r) => handle<T>(r)),
+};
+
+===== apps/web/src/auth/AuthContext.tsx =====
+import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
+import { decodeJwt, isExpired, JwtPayload } from "./jwt";
+
+interface AuthState {
+  token: string | null;
+  user: JwtPayload | null;
+  login: (token: string) => void;
+  logout: () => void;
+}
+
+const AuthContext = createContext<AuthState>({
+  token: null,
+  user: null,
+  login: () => {},
+  logout: () => {},
+});
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [token, setToken] = useState<string | null>(() => {
+    const stored = localStorage.getItem("mv_token");
+    if (!stored) return null;
+    const payload = decodeJwt(stored);
+    if (!payload || isExpired(payload)) {
+      localStorage.removeItem("mv_token");
+      return null;
+    }
+    return stored;
+  });
+
+  const user = token ? decodeJwt(token) : null;
+
+  const login = useCallback((newToken: string) => {
+    localStorage.setItem("mv_token", newToken);
+    setToken(newToken);
+  }, []);
+
+  const logout = useCallback(() => {
+    localStorage.removeItem("mv_token");
+    setToken(null);
+  }, []);
+
+  // Auto-logout when token expires
+  useEffect(() => {
+    if (!user?.exp) return;
+    const msLeft = user.exp * 1000 - Date.now();
+    if (msLeft <= 0) { logout(); return; }
+    const timer = setTimeout(logout, msLeft);
+    return () => clearTimeout(timer);
+  }, [user?.exp, logout]);
+
+  return (
+    <AuthContext.Provider value={{ token, user, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
+
+
+===== apps/web/src/auth/ProtectedRoute.tsx =====
+import { Navigate, Outlet } from "react-router-dom";
+import { useAuth } from "./AuthContext";
+
+export function ProtectedRoute() {
+  const { token } = useAuth();
+  return token ? <Outlet /> : <Navigate to="/login" replace />;
+}
+
+
+===== apps/web/src/auth/jwt.ts =====
+/**
+ * Minimal JWT payload decoder for the frontend.
+ * NEVER use the result for access control — that happens server-side.
+ * This is purely so the UI can display the user's name and role.
+ */
+export interface JwtPayload {
+  id: string;
+  organizationId: string;
+  role: "owner" | "pricing_manager" | "inventory_manager" | "viewer";
+  iat?: number;
+  exp?: number;
+}
+
+export function decodeJwt(token: string): JwtPayload | null {
+  try {
+    const [, payloadB64] = token.split(".");
+    const json = atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(json) as JwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+export function isExpired(payload: JwtPayload): boolean {
+  if (!payload.exp) return false;
+  return Date.now() / 1000 > payload.exp;
+}
+
+
+===== apps/web/src/layout/AppShell.tsx =====
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { AiAssistant } from "../components/AiAssistant";
+import { useAuth } from "../auth/AuthContext";
+
+const NAV_TABS = [
+  { to: "/app", label: "Dashboard", end: true },
+  { to: "/app/inventory", label: "Inventory" },
+  { to: "/app/pricing", label: "Pricing" },
+  { to: "/app/procurement", label: "Procurement" },
+  { to: "/app/billing", label: "Billing" },
+];
+
+export function AppShell() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  return (
+    <div className="mv-app" style={{ display: "flex" }}>
+      <div className="mv-bg" aria-hidden />
+      <nav className="app-nav" style={{ width: 220, borderRight: "1px solid var(--hairline)", padding: "20px 0", flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div className="mv-logo" style={{ padding: "0 24px 20px" }}><i />Marginview</div>
+
+        {NAV_TABS.map((t) => (
+          <NavLink key={t.to} to={t.to} end={t.end} className="mv-nav-item">{t.label}</NavLink>
+        ))}
+
+        <div style={{ borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
+        <NavLink to="/app/settings" className="mv-nav-item">Settings</NavLink>
+        {user?.role === "owner" && <NavLink to="/app/admin" className="mv-nav-item">Team & access</NavLink>}
+
+        <div style={{ flex: 1 }} />
+        <div style={{ padding: "12px 24px", borderTop: "1px solid var(--hairline)" }}>
+          <div className="mono" style={{ fontSize: 11, color: "var(--slate)" }}>{user?.role ?? "—"}</div>
+          <button onClick={() => { logout(); navigate("/login"); }} className="btn" style={{ width: "100%", justifyContent: "flex-start", border: "none", background: "none", padding: "6px 0", fontSize: 12, color: "var(--slate)" }}>
+            Sign out
+          </button>
+        </div>
+      </nav>
+
+      <main style={{ flex: 1, padding: 28, overflow: "auto" }}>
+        <Outlet />
+      </main>
+      <AiAssistant />
+    </div>
+  );
+}
+
+
+===== apps/web/src/lib/useApi.ts =====
+import { useCallback, useEffect, useState } from "react";
+
+// Same origin and token as src/api/client.ts
+const API_ORIGIN = import.meta.env.VITE_API_URL || "";
+
+export async function request<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem("mv_token");
+  const res = await fetch(`${API_ORIGIN}/api${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    let msg = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      if (typeof body?.error === "string") msg = body.error; else if (body?.error) msg = "Some fields are invalid. Check the form and try again.";
+      else if (body?.message) msg = body.message;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(msg);
+  }
+  return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
+}
+
+export function useApi<T>(path: string | null) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(!!path);
+
+  const load = useCallback(async () => {
+    if (!path) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await request<T>(path));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [path]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return { data, error, loading, reload: load };
+}
+
+===== apps/web/src/components/StatusPill.tsx =====
+type Tone = "ok" | "warn" | "crit" | "info";
+
+const LABELS: Record<string, { label: string; tone: Tone }> = {
+  healthy: { label: "Healthy", tone: "ok" },
+  low: { label: "Low", tone: "warn" },
+  out_of_stock: { label: "Out of stock", tone: "crit" },
+  overstocked: { label: "Overstocked", tone: "info" },
+};
+
+export function StatusPill({ status }: { status: string }) {
+  const entry = LABELS[status] ?? { label: status, tone: "info" as Tone };
+  return (
+    <span className={`pill ${entry.tone}`}>
+      <span className="dot" />
+      {entry.label}
+    </span>
+  );
+}
+
+
+===== apps/web/src/components/StateView.tsx =====
+import type { ReactNode } from "react";
+
+type Props = {
+  loading: boolean;
+  error: string | null;
+  isEmpty: boolean;
+  emptyTitle: string;
+  emptyHint: string;
+  onRetry?: () => void;
+  children: ReactNode;
+};
+
+/** The four states from App Flow 3.5: loading, empty, error, populated. */
+export default function StateView({ loading, error, isEmpty, emptyTitle, emptyHint, onRetry, children }: Props) {
+  if (loading) {
+    return (
+      <div className="mv-skel-stack" aria-busy="true" aria-label="Loading">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="mv-skel" />
+        ))}
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="mv-state" role="alert">
+        <strong>We couldn't load this view</strong>
+        <p>{error}</p>
+        {onRetry && (
+          <button className="mv-btn" onClick={onRetry}>
+            Try again
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (isEmpty) {
+    return (
+      <div className="mv-state">
+        <strong>{emptyTitle}</strong>
+        <p>{emptyHint}</p>
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
+
+
+===== apps/web/src/pages/Dashboard.tsx =====
+import { SkeletonRows } from "../components/Skeleton";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api/client";
+import { StatusPill } from "../components/StatusPill";
+import { useAuth } from "../auth/AuthContext";
+
+interface InventoryRow {
+  id: string;
+  sku: string;
+  name: string;
+  status: string;
+  on_hand: number;
+  location_name: string;
+}
+
+interface Suggestion {
+  id: string;
+  sku: string;
+  name: string;
+  location_name: string;
+  suggested_quantity: number;
+  reason: { daysOfCover: number | null; leadTimeDays: number };
+}
+
+interface ScrapingSource {
+  id: string;
+  competitor_name: string;
+  product_name: string;
+  last_status: string;
+  validation_flag: string | null;
+  latest_price_cents: number | null;
+  latest_currency: string;
+  latest_observed_at: string | null;
+}
+
+function money(cents: number, currency = "USD") {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
+}
+
+function StatCard({ label, value, sub, tone }: { label: string; value: string | number; sub?: string; tone?: "warn" | "crit" | "ok" }) {
+  const colors: Record<string, string> = { warn: "var(--warning)", crit: "var(--critical)", ok: "var(--success)" };
+  return (
+    <div className="card" style={{ padding: "18px 20px" }}>
+      <div style={{ fontSize: 12, color: "var(--slate)", fontWeight: 600, textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: tone ? colors[tone] : "var(--ink)" }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "var(--slate)", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+export function Dashboard() {
+  const { user } = useAuth();
+  const [inventory, setInventory] = useState<InventoryRow[] | null>(null);
+  const [suggestions, setSuggestions] = useState<Suggestion[] | null>(null);
+  const [sources, setSources] = useState<ScrapingSource[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get<InventoryRow[]>("/inventory/levels").then(setInventory).catch(() => setError("API unavailable."));
+    api.get<Suggestion[]>("/procurement/suggestions").then(setSuggestions).catch(() => {});
+    api.get<ScrapingSource[]>("/scraping/sources").then(setSources).catch(() => {});
+  }, []);
+
+  const outOfStock = inventory?.filter(r => r.status === "out_of_stock") ?? [];
+  const lowStock   = inventory?.filter(r => r.status === "low") ?? [];
+  const spikes     = sources?.filter(s => s.validation_flag === "out_of_band") ?? [];
+  const failedSources = sources?.filter(s => s.last_status === "failed") ?? [];
+
+  return (
+    <div>
+      <h1 style={{ fontSize: 22, margin: "0 0 2px" }}>Dashboard</h1>
+      {error && (
+        <div style={{ background: "#FBEAE7", color: "var(--critical)", border: "1px solid var(--critical)", borderRadius: 6, padding: "10px 14px", fontSize: 13, marginBottom: 16 }}>
+          {error} Is the API running on port 4000?
+        </div>
+      )}
+
+      {/* Stat row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 20 }}>
+        <StatCard
+          label="Out of stock"
+          value={outOfStock.length}
+          tone={outOfStock.length > 0 ? "crit" : "ok"}
+          sub={outOfStock.length > 0 ? "Needs immediate action" : "All good"}
+        />
+        <StatCard
+          label="Low stock"
+          value={lowStock.length}
+          tone={lowStock.length > 0 ? "warn" : "ok"}
+          sub={lowStock.length > 0 ? "Below reorder point" : "Levels healthy"}
+        />
+        <StatCard
+          label="Reorder suggestions"
+          value={suggestions?.length ?? "—"}
+          tone={(suggestions?.length ?? 0) > 0 ? "warn" : "ok"}
+          sub="Open procurement actions"
+        />
+        <StatCard
+          label="Price spikes"
+          value={spikes.length}
+          tone={spikes.length > 0 ? "warn" : "ok"}
+          sub="Competitors flagged out-of-band"
+        />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+        {/* Inventory alerts */}
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <strong style={{ fontSize: 14 }}>Inventory alerts</strong>
+            <Link to="/app/inventory" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
+          </div>
+          {inventory === null && <SkeletonRows rows={3} />}
+          {inventory?.length === 0 && <p style={{ color: "var(--slate)", fontSize: 13 }}>No products yet.</p>}
+          {[...outOfStock, ...lowStock].length === 0 && inventory !== null && inventory.length > 0 && (
+            <p style={{ color: "var(--success)", fontSize: 13 }}>✓ All inventory levels are healthy.</p>
+          )}
+          {[...outOfStock, ...lowStock].map(row => (
+            <div key={row.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--hairline)" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{row.name}</div>
+                <div style={{ fontSize: 11, color: "var(--slate)" }}>{row.sku} · {row.location_name} · {row.on_hand} on hand</div>
+              </div>
+              <StatusPill status={row.status} />
+            </div>
+          ))}
+        </div>
+
+        {/* Procurement suggestions */}
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <strong style={{ fontSize: 14 }}>Procurement</strong>
+            <Link to="/app/procurement" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
+          </div>
+          {suggestions === null && <SkeletonRows rows={3} />}
+          {suggestions?.length === 0 && <p style={{ color: "var(--success)", fontSize: 13 }}>✓ No open reorder suggestions.</p>}
+          {suggestions?.slice(0, 5).map(s => (
+            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--hairline)" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{s.name}</div>
+                <div style={{ fontSize: 11, color: "var(--slate)" }}>{s.sku} · {s.location_name}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: (s.reason.daysOfCover ?? 99) <= 3 ? "var(--critical)" : "var(--warning)" }}>
+                  {s.reason.daysOfCover ?? "—"}d cover
+                </div>
+                <div style={{ fontSize: 11, color: "var(--slate)" }}>Suggest {s.suggested_quantity} units</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Pricing alerts */}
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <strong style={{ fontSize: 14 }}>Competitor pricing alerts</strong>
+            <Link to="/app/pricing" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
+          </div>
+          {sources === null && <SkeletonRows rows={3} />}
+          {sources?.length === 0 && (
+            <p style={{ color: "var(--slate)", fontSize: 13 }}>
+              No competitors tracked yet.{" "}
+              <Link to="/app/pricing" style={{ color: "var(--accent)" }}>Add one →</Link>
+            </p>
+          )}
+          {spikes.length === 0 && (sources?.length ?? 0) > 0 && (
+            <p style={{ color: "var(--success)", fontSize: 13 }}>✓ No price spikes detected.</p>
+          )}
+          {spikes.map(s => (
+            <div key={s.id} style={{ padding: "9px 0", borderBottom: "1px solid var(--hairline)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{s.competitor_name}</div>
+                <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 10, background: "#FBF0E4", color: "var(--warning)" }}>
+                  Price spike
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--slate)" }}>
+                {s.product_name} · {s.latest_price_cents ? money(s.latest_price_cents, s.latest_currency) : "—"}
+                {s.latest_observed_at ? ` · ${new Date(s.latest_observed_at).toLocaleString()}` : ""}
+              </div>
+            </div>
+          ))}
+          {failedSources.length > 0 && (
+            <div style={{ marginTop: 10, padding: "8px 10px", background: "#FBEAE7", borderRadius: 6, fontSize: 12, color: "var(--critical)" }}>
+              {failedSources.length} source{failedSources.length > 1 ? "s" : ""} failed on last check. Review in{" "}
+              <Link to="/app/settings" style={{ color: "var(--critical)" }}>Settings → Tracked competitors</Link>.
+            </div>
+          )}
+        </div>
+
+        {/* Quick links */}
+        <div className="card">
+          <strong style={{ display: "block", marginBottom: 14, fontSize: 14 }}>Quick actions</strong>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <Link to="/app/pricing" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
+              📊 Review a pricing strategy
+            </Link>
+            <Link to="/app/procurement" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
+              📦 Create a purchase order
+            </Link>
+            <Link to="/app/settings" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
+              ⚙️ Settings & tracked competitors
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+===== apps/web/src/pages/Pricing.tsx =====
+import React, { useEffect, useMemo, useState } from "react";
+import { apiJson, formatCents, type InventoryLevel } from "../types/inventory";
+import { OptimizedPricingPanel } from "../components/OptimizedPricingPanel";
+
+export default function Pricing() {
+  const [levels, setLevels] = useState<InventoryLevel[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [variantId, setVariantId] = useState("");
+
+  useEffect(() => {
+    apiJson<InventoryLevel[]>("/api/inventory/levels")
+      .then((data) => {
+        setLevels(data);
+        setVariantId((cur) => cur || data[0]?.variant_id || "");
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load products."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  // Levels are per location; pricing is per variant, so collapse to one option per variant.
+  const variants = useMemo(() => {
+    const map = new Map<string, InventoryLevel>();
+    for (const l of levels) if (!map.has(l.variant_id)) map.set(l.variant_id, l);
+    return [...map.values()];
+  }, [levels]);
+
+  const selected = variants.find((v) => v.variant_id === variantId) ?? null;
+
+  return (
+    <div className="app-content">
+      <div className="page-header">
+        <div>
+          <h1>Pricing</h1>
+        </div>
+      </div>
+
+      {loading && <p style={{ color: "var(--mv-muted, #8fa396)" }}>Loading…</p>}
+      {error && <p role="alert" style={{ color: "var(--mv-danger, #e5735f)" }}>{error}</p>}
+      {!loading && !error && variants.length === 0 && <p>No products yet. Add some on the Inventory page.</p>}
+
+      {variants.length > 0 && (
+        <div style={{ display: "grid", gap: 24 }}>
+          <label style={{ display: "grid", gap: 4, maxWidth: 420, fontSize: 13, color: "var(--mv-muted, #8fa396)" }}>
+            Product
+            <select
+              value={variantId}
+              onChange={(e) => setVariantId(e.target.value)}
+              style={{ background: "var(--mv-field, #0c120f)", color: "var(--mv-text, #e8efe9)", border: "1px solid var(--mv-border, rgba(255,255,255,0.12))", borderRadius: 6, padding: "8px 10px" }}
+            >
+              {variants.map((v) => (
+                <option key={v.variant_id} value={v.variant_id}>{v.sku} · {v.product_name} · cost {formatCents(v.cost)}</option>
+              ))}
+            </select>
+          </label>
+
+          {selected && <OptimizedPricingPanel key={selected.variant_id} variantId={selected.variant_id} costCents={selected.cost} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+===== apps/web/src/pages/PricingList.tsx =====
+import { SkeletonRows } from "../components/Skeleton";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api/client";
+
+interface ProductRow {
+  variant_id: string;
+  sku: string;
+  name: string;
+  current_price_cents: number | null;
+  currency: string;
+}
+
+export function PricingList() {
+  const [rows, setRows] = useState<ProductRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<ProductRow[]>("/products")
+      .then(setRows)
+      .catch(() => setError("Could not load products."));
+  }, []);
+
+  return (
+    <div>
+      <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Pricing intelligence</h1>
+      <div className="card">
+        {error && <p style={{ color: "var(--critical)" }}>{error}</p>}
+        {!error && rows === null && <SkeletonRows rows={5} />}
+        {rows?.length === 0 && <p style={{ color: "var(--slate)" }}>No products yet. Add one to get started.</p>}
+        {rows && rows.length > 0 && (
+          <table>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.variant_id}>
+                  <td>{r.name} ({r.sku})</td>
+                  <td>
+                    <Link className="btn" to={`/app/pricing/${r.variant_id}`}>
+                      Review pricing
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+===== apps/web/src/pages/CompetitorSources.tsx =====
+import { useState } from "react";
+import { request, useApi } from "../lib/useApi";
+import StateView from "../components/StateView";
+import "../styles/extra-pages.css";
+
+// Shape returned by GET /api/scraping/sources
+type Source = {
+  id: string;
+  url: string;
+  compliance_status: string;
+  scrape_interval_minutes: number;
+  last_checked_at: string | null;
+  last_status: "ok" | "failed" | null;
+  competitor_product_id: string;
+  competitor_name: string;
+  price_selector: string | null;
+  sku: string;
+  product_name: string;
+  latest_price_cents: number | null;
+  latest_currency: string | null;
+  latest_observed_at: string | null;
+  validation_flag: string | null;
+};
+
+const INTERVALS = [
+  { minutes: 60, label: "1 hour" },
+  { minutes: 360, label: "6 hours" },
+  { minutes: 720, label: "12 hours" },
+  { minutes: 1440, label: "24 hours" },
+];
+
+function money(cents: number, currency: string | null) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(cents / 100);
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${currency ?? ""}`.trim();
+  }
+}
+
+export default function CompetitorSources() {
+  const { data, error, loading, reload } = useApi<Source[]>("/scraping/sources");
+  const [url, setUrl] = useState("");
+  const [competitorName, setCompetitorName] = useState("");
+  const [variantId, setVariantId] = useState("");
+  const [selector, setSelector] = useState("");
+  const [intervalMinutes, setIntervalMinutes] = useState(720);
+  const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function add() {
+    setMsg(null);
+    setNotice(null);
+    try {
+      new URL(url);
+    } catch {
+      return setMsg("Enter a full URL, starting with https://");
+    }
+    if (!competitorName.trim()) return setMsg("Enter the competitor's name.");
+    if (!/^[0-9a-f-]{36}$/i.test(variantId.trim())) {
+      return setMsg("Enter the product variant ID. It's a 36-character code, shown at the end of the product's Pricing page address.");
+    }
+    setBusy(true);
+    try {
+      // The server runs the robots.txt compliance check and may register the source as manual-only.
+      const r = await request<{ message: string }>("/scraping/sources", {
+        method: "POST",
+        body: JSON.stringify({
+          url,
+          competitorName: competitorName.trim(),
+          productVariantId: variantId.trim(),
+          priceSelector: selector.trim() || undefined,
+          scrapeIntervalMinutes: intervalMinutes,
+        }),
+      });
+      setNotice(r.message);
+      setUrl("");
+      setCompetitorName("");
+      setVariantId("");
+      setSelector("");
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkNow(s: Source) {
+    setMsg(null);
+    setNotice(null);
+    setChecking(s.id);
+    try {
+      const r = await request<{ extracted: { priceCents: number | null; currency?: string }; validationFlag: string }>(
+        `/scraping/sources/${s.id}/run`,
+        { method: "POST" }
+      );
+      if (r.extracted.priceCents == null) {
+        setNotice("The check ran but found no price. Check the price selector.");
+      } else {
+        const flag = r.validationFlag && r.validationFlag !== "ok" ? ` (flagged: ${r.validationFlag})` : "";
+        setNotice(`Price found: ${money(r.extracted.priceCents, r.extracted.currency ?? s.latest_currency)}${flag}`);
+      }
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+      reload();
+    } finally {
+      setChecking(null);
+    }
+  }
+
+  async function enterPrice(s: Source) {
+    const v = window.prompt(`Enter ${s.competitor_name}'s current price for ${s.product_name}`);
+    if (!v) return;
+    const cents = Math.round(parseFloat(v.replace(/[^0-9.]/g, "")) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) return setMsg("Enter a price greater than zero, like 19.99.");
+    setMsg(null);
+    try {
+      await request("/scraping/manual-entry", {
+        method: "POST",
+        body: JSON.stringify({
+          competitorProductId: s.competitor_product_id,
+          priceCents: cents,
+          currency: s.latest_currency || "USD",
+        }),
+      });
+      setNotice("Price saved and labelled as manually entered.");
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  }
+
+  const status = (s: Source) => {
+    if (s.compliance_status !== "automated_allowed") return <span className="mv-badge">Manual entry only</span>;
+    if (s.last_status === "failed") return <span className="mv-badge warn">Last check failed</span>;
+    if (s.last_status === "ok") return <span className="mv-badge">Working</span>;
+    return <span className="mv-badge">Not checked yet</span>;
+  };
+
+  return (
+    <div className="mv-page">
+      <h1>Tracked competitor sources</h1>
+      <p className="mv-sub">
+        Pages we check for competitor prices. We only collect the price, stock status and currency shown publicly. Sites that don't allow
+        automated access switch to manual entry.
+      </p>
+
+      <div className="mv-row">
+        <div className="mv-field">
+          <label htmlFor="cs-url">Competitor page URL</label>
+          <input id="cs-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://" />
+        </div>
+        <div className="mv-field">
+          <label htmlFor="cs-name">Competitor name</label>
+          <input id="cs-name" value={competitorName} onChange={(e) => setCompetitorName(e.target.value)} />
+        </div>
+        <div className="mv-field">
+          <label htmlFor="cs-var">Product variant ID</label>
+          <input id="cs-var" value={variantId} onChange={(e) => setVariantId(e.target.value)} />
+        </div>
+        <div className="mv-field">
+          <label htmlFor="cs-sel">Price selector (optional)</label>
+          <input id="cs-sel" value={selector} onChange={(e) => setSelector(e.target.value)} placeholder="p.price_color" />
+        </div>
+        <div className="mv-field">
+          <label htmlFor="cs-int">Check every</label>
+          <select id="cs-int" value={intervalMinutes} onChange={(e) => setIntervalMinutes(Number(e.target.value))}>
+            {INTERVALS.map((i) => (
+              <option key={i.minutes} value={i.minutes}>
+                {i.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button className="mv-btn" onClick={add} disabled={busy}>
+          Add source
+        </button>
+      </div>
+
+      {msg && (
+        <p className="mv-error" role="alert">
+          {msg}
+        </p>
+      )}
+      {notice && <p role="status">{notice}</p>}
+
+      <StateView
+        loading={loading}
+        error={error}
+        onRetry={reload}
+        isEmpty={!data || data.length === 0}
+        emptyTitle="No tracked competitors yet"
+        emptyHint="Add a competitor page above to start comparing prices."
+      >
+        <div className="mv-table-wrap">
+          <table className="mv-table">
+            <thead>
+              <tr>
+                <th>Competitor</th>
+                <th>Product</th>
+                <th>Latest price</th>
+                <th>Every</th>
+                <th>Last checked</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {data?.map((s) => {
+                const manual = s.compliance_status !== "automated_allowed";
+                return (
+                  <tr key={s.id}>
+                    <td>
+                      {s.competitor_name}
+                      <br />
+                      <small style={{ wordBreak: "break-all" }}>{s.url}</small>
+                    </td>
+                    <td>
+                      {s.product_name}
+                      <br />
+                      <small>{s.sku}</small>
+                    </td>
+                    <td>
+                      {s.latest_price_cents == null ? "None yet" : money(s.latest_price_cents, s.latest_currency)}
+                      {s.validation_flag && s.validation_flag !== "ok" && (
+                        <>
+                          {" "}
+                          <span className="mv-badge warn">Needs review</span>
+                        </>
+                      )}
+                      {s.latest_observed_at && (
+                        <>
+                          <br />
+                          <small>{new Date(s.latest_observed_at).toLocaleString()}</small>
+                        </>
+                      )}
+                    </td>
+                    <td>{s.scrape_interval_minutes >= 60 ? `${s.scrape_interval_minutes / 60}h` : `${s.scrape_interval_minutes}m`}</td>
+                    <td>{s.last_checked_at ? new Date(s.last_checked_at).toLocaleString() : "Never"}</td>
+                    <td>{status(s)}</td>
+                    <td>
+                      {manual ? (
+                        <button className="mv-btn secondary" onClick={() => enterPrice(s)}>
+                          Enter price
+                        </button>
+                      ) : (
+                        <button className="mv-btn secondary" onClick={() => checkNow(s)} disabled={checking === s.id}>
+                          {checking === s.id ? "Checking..." : "Check now"}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </StateView>
+    </div>
+  );
+}
+
+
+===== apps/web/src/styles/tokens.css =====
+/* ── Green ramp (single hue, 145°) ─────────────────────────────── */
+:root {
+  --g-100: #dcfce7; --g-300: #86efac; --g-400: #4ade80; --g-500: #22c55e;
+  --g-600: #16a34a; --g-700: #15803d; --g-800: #166534; --g-900: #14532d; --g-950: #052e16;
+
+  /* semantic: green = brand + success; the rest only carry meaning */
+  --accent: var(--g-400);
+  --accent-ink: #04130a;
+  --success: var(--g-400);  --success-bg: rgba(74,222,128,.12);
+  --warning: #fbbf24;       --warning-bg: rgba(251,191,36,.12);
+  --critical: #f87171;      --critical-bg: rgba(248,113,113,.12);
+  --info: #7dd3c0;          --info-bg: rgba(125,211,192,.12);
+
+  /* legacy names used by every page */
+  --paper: #080808;
+  --card: #0e0e0e;
+  --ink: #f0f0f0;
+  --slate: #8b918c;
+  --hairline: rgba(255,255,255,.09);
+
+  --space-1: 4px; --space-2: 8px; --space-3: 16px; --space-4: 24px; --space-5: 32px;
+  --radius: 10px;
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: "Instrument Sans", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+html { scroll-behavior: smooth; }
+body { background: var(--paper); color: var(--ink); font: 15px/1.5 var(--font-ui); -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { font-family: var(--font-display); letter-spacing: -.02em; }
+::selection { background: var(--g-400); color: var(--accent-ink); }
+:focus-visible { outline: 2px solid var(--g-400); outline-offset: 2px; }
+::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 3px; }
+
+/* ── Shared primitives ─────────────────────────────────────────── */
+.card { background: var(--card); border: 1px solid var(--hairline); border-radius: var(--radius); padding: var(--space-3); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; color: var(--slate); font-weight: 500; font-size: 12px; padding: var(--space-2); border-bottom: 1px solid var(--hairline); }
+td { padding: 10px var(--space-2); border-bottom: 1px solid rgba(255,255,255,.05); }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: rgba(255,255,255,.03); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--hairline); background: rgba(255,255,255,.04); color: var(--ink);
+  padding: 8px 14px; border-radius: 8px; font: 500 13px var(--font-ui);
+  cursor: pointer; text-decoration: none; transition: background .15s, border-color .15s, transform .15s;
+}
+.btn:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); }
+.btn:active { transform: scale(.98); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary, .btn.active { background: var(--g-400); color: var(--accent-ink); border-color: var(--g-400); font-weight: 600; }
+.btn.primary:hover, .btn.active:hover { background: var(--g-300); border-color: var(--g-300); }
+
+input, select, textarea { background: rgba(255,255,255,.04); color: var(--ink); border: 1px solid var(--hairline); border-radius: 8px; font-family: inherit; }
+input::placeholder { color: rgba(255,255,255,.3); }
+input:focus, select:focus, textarea:focus { border-color: var(--g-500); outline: none; box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; }
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+.pill.ok   { color: var(--success);  background: var(--success-bg); }  .pill.ok .dot   { background: var(--success); }
+.pill.warn { color: var(--warning);  background: var(--warning-bg); }  .pill.warn .dot { background: var(--warning); }
+.pill.crit { color: var(--critical); background: var(--critical-bg); } .pill.crit .dot { background: var(--critical); }
+.pill.info { color: var(--info);     background: var(--info-bg); }     .pill.info .dot { background: var(--info); }
+
+.mono { font-family: var(--font-mono); }
+.up { color: var(--success); } .down { color: var(--critical); } .flat { color: var(--slate); }
+
+/* ── Skeleton loaders ──────────────────────────────────────────── */
+.sk {
+  display: block; border-radius: 6px; min-height: 12px;
+  background: linear-gradient(90deg, rgba(255,255,255,.05) 25%, rgba(74,222,128,.14) 50%, rgba(255,255,255,.05) 75%);
+  background-size: 200% 100%; animation: sk 1.4s ease-in-out infinite;
+}
+@keyframes sk { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .15; } }
+@keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@keyframes flash { from { color: var(--g-300); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; } }
+
+/* ═══ PUBLIC: minimalist black ═══════════════════════════════════ */
+.mv-nav {
+  position: fixed; inset: 0 0 auto 0; z-index: 50; height: 56px;
+  display: flex; align-items: center; justify-content: space-between; padding: 0 max(24px, calc(50% - 576px));
+  transition: background .25s, border-color .25s; border-bottom: 1px solid transparent;
+}
+.mv-nav.solid { background: rgba(8,8,8,.85); backdrop-filter: blur(16px); border-color: var(--hairline); }
+.mv-logo { font: 600 15px var(--font-display); color: #fff; text-decoration: none; display: flex; align-items: center; gap: 8px; }
+.mv-logo i { width: 8px; height: 8px; border-radius: 2px; background: var(--g-400); }
+.mv-nav-links { display: flex; gap: 8px; align-items: center; }
+.mv-nav-links a.txt { font: 400 12px var(--font-mono); color: var(--slate); padding: 8px 12px; text-decoration: none; }
+.mv-nav-links a.txt:hover { color: #fff; }
+
+.mv-wrap { max-width: 1152px; margin: 0 auto; padding: 0 24px; }
+.mv-ticker { position: fixed; top: 56px; inset-inline: 0; z-index: 40; overflow: hidden; padding: 9px 0; background: #0c0c0c; border-bottom: 1px solid var(--hairline); }
+.mv-ticker div { display: flex; gap: 40px; white-space: nowrap; width: max-content; animation: ticker 32s linear infinite; font: 12px var(--font-mono); }
+.mv-ticker span { color: var(--slate); }
+
+.mv-hero { padding: 200px 0 96px; display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+.mv-hero h1 { font-size: clamp(36px, 5vw, 56px); line-height: 1.05; font-weight: 600; margin: 0 0 32px; color: #fff; }
+.mv-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; margin-bottom: 32px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--card); font: 12px var(--font-mono); color: var(--slate); }
+.mv-badge i, .mv-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--g-400); animation: blink 1.4s step-start infinite; }
+.mv-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.mv-actions .btn { padding: 12px 24px; font-family: var(--font-mono); font-size: 12px; }
+
+.mv-table { border: 1px solid var(--hairline); border-radius: 12px; overflow: hidden; background: var(--card); font: 12px var(--font-mono); }
+.mv-row { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr .9fr; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.05); align-items: center; gap: 8px; }
+.mv-row.head { color: var(--slate); font-size: 11px; padding: 10px 16px; border-color: var(--hairline); }
+.mv-live { display: flex; gap: 8px; align-items: center; padding: 10px 16px; color: var(--slate); }
+.mv-flash { animation: flash 1.2s ease forwards; }
+
+.mv-section { padding: 96px 0; border-top: 1px solid var(--hairline); }
+.mv-section h2 { font-size: clamp(26px, 3.5vw, 36px); font-weight: 600; margin: 0 0 56px; color: #fff; }
+.mv-features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--hairline); border: 1px solid var(--hairline); border-radius: 12px; overflow: hidden; }
+.mv-feature { background: var(--paper); padding: 40px; position: relative; transition: background .3s; }
+.mv-feature:hover { background: var(--card); }
+.mv-feature::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--g-400); opacity: 0; transition: opacity .3s; }
+.mv-feature:hover::before { opacity: 1; }
+.mv-feature h3 { margin: 0 0 10px; font-size: 17px; font-weight: 600; color: #fff; }
+.mv-feature p { margin: 0; color: var(--slate); font-size: 14px; line-height: 1.6; }
+
+.mv-plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.mv-plan { border: 1px solid var(--hairline); border-radius: 12px; padding: 32px; background: var(--card); position: relative; }
+.mv-plan.hi { border-color: var(--g-500); background: linear-gradient(180deg, rgba(34,197,94,.10), var(--card) 60%); }
+.mv-plan .tag { position: absolute; top: -12px; left: 24px; background: var(--g-400); color: var(--accent-ink); font: 600 11px var(--font-mono); padding: 3px 10px; border-radius: 999px; }
+.mv-plan h3 { margin: 0 0 20px; font: 500 14px var(--font-mono); color: var(--slate); }
+.mv-price { font: 600 40px var(--font-display); color: #fff; margin-bottom: 24px; }
+.mv-price small { font: 400 13px var(--font-mono); color: var(--slate); }
+.mv-plan ul { list-style: none; margin: 0 0 28px; padding: 0 0 24px; border-bottom: 1px solid var(--hairline); display: grid; gap: 10px; font: 12px var(--font-mono); color: rgba(255,255,255,.6); }
+.mv-plan li::before { content: "✓"; color: var(--g-400); margin-right: 10px; }
+.mv-plan .btn { width: 100%; }
+
+.mv-footer { border-top: 1px solid var(--hairline); padding: 32px 0; font: 12px var(--font-mono); color: rgba(255,255,255,.3); }
+.mv-footer .mv-wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.mv-footer a { color: inherit; text-decoration: none; margin-left: 20px; } .mv-footer a:hover { color: #fff; }
+
+/* Demo page */
+.mv-demo { padding: 104px 0 80px; }
+.mv-demo h1 { font-size: 32px; font-weight: 600; margin: 0 0 32px; color: #fff; }
+.mv-video { position: relative; aspect-ratio: 16/9; border: 1px solid var(--hairline); border-radius: 12px; overflow: hidden; background: var(--card); margin-bottom: 32px; }
+.mv-video video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mv-video .sk, .mv-video .empty { position: absolute; inset: 0; border-radius: 0; }
+.mv-video .empty { display: grid; place-items: center; color: var(--slate); font: 13px var(--font-mono); text-align: center; padding: 24px; }
+.mv-demo-grid { display: grid; grid-template-columns: 220px 1fr; gap: 20px; }
+.mv-side { display: grid; gap: 8px; align-content: start; }
+.mv-side .btn { flex-direction: column; align-items: flex-start; text-align: left; padding: 10px 12px; }
+.mv-stat { font: 600 30px var(--font-display); }
+
+/* ═══ APP: glass over nature ═════════════════════════════════════ */
+.mv-app {
+  --paper: transparent; --card: rgba(18,22,20,.52); --ink: #eef3ef; --slate: #a2ada6; --hairline: rgba(255,255,255,.13);
+  position: relative; height: 100%; color: var(--ink);
+}
+.mv-bg {
+  position: fixed; inset: 0; z-index: -1;
+  background:
+    linear-gradient(rgba(12,16,14,.52), rgba(12,16,14,.78)),
+    url("/bg/nature.jpg") center / cover no-repeat,
+    radial-gradient(ellipse 80% 60% at 20% 10%, #1f4d3a 0%, transparent 60%),
+    radial-gradient(ellipse 70% 70% at 90% 90%, #12352a 0%, transparent 60%),
+    #0d1512;
+}
+.mv-app .card, .mv-glass {
+  background: var(--card);
+  backdrop-filter: blur(24px) saturate(160%); -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--hairline);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 8px 32px rgba(0,0,0,.28);
+}
+.mv-app input, .mv-app select, .mv-app textarea { background: rgba(255,255,255,.06) !important; }
+.mv-app h1 { font-size: 24px !important; font-weight: 600; margin: 0 0 24px !important; }
+.mv-app .app-nav { background: rgba(14,18,16,.5); backdrop-filter: blur(28px) saturate(160%); -webkit-backdrop-filter: blur(28px) saturate(160%); }
+.mv-nav-item { display: block; padding: 9px 14px; margin: 1px 10px; border-radius: 8px; color: var(--slate); text-decoration: none; font-size: 14px; transition: background .15s, color .15s; }
+.mv-nav-item:hover { background: rgba(255,255,255,.06); color: var(--ink); }
+.mv-nav-item.active { background: rgba(74,222,128,.14); color: var(--g-300); font-weight: 500; }
+
+@media (max-width: 860px) {
+  .mv-hero, .mv-features, .mv-plans, .mv-demo-grid { grid-template-columns: 1fr; }
+  .mv-hero { padding-top: 160px; gap: 40px; }
+  .mv-nav-links a.txt { display: none; }
+  .mv-feature { padding: 28px; }
+}
+@media (max-width: 768px) { .mv-nav-item { margin: 0; text-align: center; border-radius: 0; } }
+
+
+===== apps/web/src/styles/layout.css =====
+@media (max-width: 768px) {
+  .app-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: 64px;
+    padding: 0 !important;
+    border-right: none !important;
+    border-top: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: row;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    z-index: 40;
+  }
+  .app-nav > div:first-child {
+    display: none;
+  }
+  .app-nav a {
+    flex: 1;
+    text-align: center;
+    padding: 12px 4px 14px !important;
+    font-size: 11px !important;
+  }
+  main {
+    padding: 16px !important;
+    padding-bottom: 80px !important;
+  }
+}

@@ -1,13 +1,18 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
+import { orgIdOf } from "../utils/http";
+
+/**
+ * FIX: The original used its own inline orgIdOf that read
+ *   u?.organization_id ?? u?.org_id ?? u?.organizationId
+ * which only worked if one of the legacy claim names was present.
+ * Now uses the canonical helper from utils/http.ts which reads
+ * req.user.organizationId — matching the normalized JWT claims.
+ *
+ * Also added: GET /api/inventory/skus/:skuId for SkuDetail.tsx.
+ */
 
 const router = Router();
-
-// Adjust to however your auth middleware attaches the user.
-const orgIdOf = (req: Request): string | undefined => {
-  const u = (req as any).user;
-  return u?.organization_id ?? u?.org_id ?? u?.organizationId;
-};
 
 const isWholeNonNeg = (v: unknown): v is number =>
   typeof v === "number" && Number.isInteger(v) && v >= 0;
@@ -23,7 +28,13 @@ const LEVELS_SQL = `
          il.location_id,
          l.name                        AS location_name,
          il.on_hand                    AS quantity,
-         il.reorder_point              AS reorder_level
+         il.reorder_point              AS reorder_level,
+         CASE
+           WHEN il.on_hand = 0 THEN 'out_of_stock'
+           WHEN il.on_hand <= il.reorder_point THEN 'low'
+           ELSE 'healthy'
+         END AS status,
+         il.on_hand
     FROM inventory_levels il
     JOIN product_variants v ON v.id = il.product_variant_id
     JOIN products  p ON p.id = v.product_id
@@ -50,10 +61,11 @@ const UPDATE_LEVEL_SQL = `
             il.reorder_point AS reorder_level
 `;
 
-/** GET /api/inventory/levels (cost is in cents) */
+/** GET /api/inventory/levels */
 router.get("/levels", async (req: Request, res: Response) => {
-  const orgId = orgIdOf(req);
-  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+  let orgId: string;
+  try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+
   try {
     const { rows } = await pool.query(LEVELS_SQL, [orgId]);
     return res.json(
@@ -62,7 +74,7 @@ router.get("/levels", async (req: Request, res: Response) => {
         cost: Number(r.cost),
         quantity: Number(r.quantity),
         reorder_level: Number(r.reorder_level),
-      }))
+      })),
     );
   } catch (err) {
     console.error("GET /inventory/levels failed", err);
@@ -72,12 +84,13 @@ router.get("/levels", async (req: Request, res: Response) => {
 
 /** GET /api/inventory/locations */
 router.get("/locations", async (req: Request, res: Response) => {
-  const orgId = orgIdOf(req);
-  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+  let orgId: string;
+  try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+
   try {
     const { rows } = await pool.query(
       "SELECT id, name FROM locations WHERE organization_id = $1 ORDER BY name",
-      [orgId]
+      [orgId],
     );
     return res.json(rows);
   } catch (err) {
@@ -86,10 +99,70 @@ router.get("/locations", async (req: Request, res: Response) => {
   }
 });
 
-/** PATCH /api/inventory/levels/:id  body: { quantity?, reorder_level? } */
+/**
+ * GET /api/inventory/skus/:skuId
+ * FIX: SkuDetail.tsx calls /api/skus/:skuId but no route existed for it.
+ * Mounted here under /api/inventory/skus/:skuId and App.tsx already reaches
+ * it via the /app/inventory/:skuId route → useApi('/skus/${skuId}').
+ * To avoid breaking existing navigation we also register the short alias on
+ * the index.ts app under /api/skus (see instructions in the gap analysis).
+ */
+router.get("/skus/:skuId", async (req: Request, res: Response) => {
+  let orgId: string;
+  try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+
+  try {
+    const { rows: [variant] } = await pool.query(
+      `SELECT v.id, v.sku, p.name
+         FROM product_variants v
+         JOIN products p ON p.id = v.product_id
+        WHERE v.id = $1 AND p.organization_id = $2 AND v.deleted_at IS NULL`,
+      [req.params.skuId, orgId],
+    );
+    if (!variant) return res.status(404).json({ error: "SKU not found" });
+
+    const { rows: locations } = await pool.query(
+      `SELECT l.name AS location,
+              il.on_hand      AS "onHand",
+              0               AS committed,
+              0               AS incoming,
+              il.on_hand      AS available,
+              il.reorder_point AS "reorderPoint",
+              CASE WHEN il.on_hand = 0 THEN 'out_of_stock'
+                   WHEN il.on_hand <= il.reorder_point THEN 'low'
+                   ELSE 'healthy' END AS status
+         FROM inventory_levels il
+         JOIN locations l ON l.id = il.location_id
+        WHERE il.product_variant_id = $1`,
+      [req.params.skuId],
+    );
+
+    const { rows: movements } = await pool.query(
+      `SELECT id,
+              created_at AS at,
+              l.name AS location,
+              delta,
+              reason,
+              'system' AS actor
+         FROM inventory_movements im
+         JOIN locations l ON l.id = im.location_id
+        WHERE im.product_variant_id = $1
+        ORDER BY im.created_at DESC
+        LIMIT 50`,
+      [req.params.skuId],
+    );
+
+    return res.json({ id: variant.id, sku: variant.sku, name: variant.name, locations, movements });
+  } catch (err) {
+    console.error("GET /inventory/skus/:skuId failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** PATCH /api/inventory/levels/:id */
 router.patch("/levels/:id", async (req: Request, res: Response) => {
-  const orgId = orgIdOf(req);
-  if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+  let orgId: string;
+  try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
 
   const { quantity, reorder_level } = req.body ?? {};
   if (quantity === undefined && reorder_level === undefined) {

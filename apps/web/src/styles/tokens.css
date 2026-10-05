@@ -158,7 +158,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--g-500); outline:
   position: fixed; inset: 0; z-index: -1;
   background:
     linear-gradient(rgba(12,16,14,.52), rgba(12,16,14,.78)),
-    url("/bg/nature.jpg") center / cover no-repeat,
     radial-gradient(ellipse 80% 60% at 20% 10%, #1f4d3a 0%, transparent 60%),
     radial-gradient(ellipse 70% 70% at 90% 90%, #12352a 0%, transparent 60%),
     #0d1512;

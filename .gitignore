@@ -8,6 +8,10 @@ dist/
 build/
 .next/
 out/
+*.tsbuildinfo
+.turbo/
+.vercel/
+.cache/
 
 # Environment Variables
 .env
@@ -20,25 +24,14 @@ out/
 *.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*
 pnpm-debug.log*
 
 # System & OS Files
 .DS_Store
 Thumbs.db
+._*
+__MACOSX/
 
-# IDE & Editor Settings
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+# IDE Settings
+.vscode/
 .idea/
-
-# Turbo / Cache
-.turbo/
-.cache/
-node_modules
-dist
-.env
-*.tsbuildinfo

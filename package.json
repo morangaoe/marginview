@@ -1,0 +1,12 @@
+{
+  "name": "marginview-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@marginview/web",
+    "build:api": "npm run build --workspace=@marginview/api"
+  }
+}

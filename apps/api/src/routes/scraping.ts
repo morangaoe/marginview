@@ -13,9 +13,7 @@ import { z } from "zod";
 import { pool, query } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { checkCompliance } from "../services/scraping/complianceCheck";
-import { extractPrice } from "../services/scraping/extractPrice";
-import { runScrapingCycle } from "../services/scraping/runScrapingCycle";
-import { validateSnapshot } from "../services/scraping/validateSnapshot";
+import { enqueueDueSources, enqueueScrape } from "../queues/scrapeQueue";
 
 export const scrapingRouter = Router();
 scrapingRouter.use(requireAuth);
@@ -160,63 +158,19 @@ scrapingRouter.post(
   "/sources/:id/run",
   requireRole("owner", "pricing_manager"),
   async (req, res) => {
-    const [source] = await query(
-      `select ss.url, cp.id as competitor_product_id, cp.price_selector,
-              ps_latest.price_cents as last_price_cents, coalesce(ps_latest.currency, 'USD') as currency
-       from scraping_sources ss
-       join competitor_products cp on cp.scraping_source_id = ss.id
-       left join lateral (
-         select price_cents, currency from price_snapshots
-         where competitor_product_id = cp.id order by observed_at desc limit 1
-       ) ps_latest on true
-       where ss.id = $1 and ss.organization_id = $2`,
-      [req.params.id, req.user!.organizationId]
-    );
-
-    if (!source) return res.status(404).json({ error: "Source not found" });
-
     try {
-      const extracted = await extractPrice(source.url, source.price_selector);
-      const flag = validateSnapshot(extracted, source.last_price_cents);
-
-      let snapshotId: string | null = null;
-      if (extracted.priceCents !== null) {
-        const [snap] = await query(
-          `insert into price_snapshots
-             (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
-           values ($1, $2, $3, $4, 'scraped', $5) returning id`,
-          [
-            source.competitor_product_id,
-            extracted.priceCents,
-            extracted.currency || source.currency,
-            extracted.inStock,
-            flag,
-          ]
-        );
-        snapshotId = snap.id;
-
-        await query(
-          `update scraping_sources set last_checked_at = now(), last_status = 'ok' where id = $1`,
-          [req.params.id]
-        );
-      } else {
-        await query(
-          `update scraping_sources set last_checked_at = now(), last_status = 'failed' where id = $1`,
-          [req.params.id]
-        );
-      }
-
-      res.json({ extracted, validationFlag: flag, snapshotId });
+      const jobId = await enqueueScrape(req.user!.organizationId, req.params.id);
+      res.status(202).json({ jobId });
     } catch (err: any) {
-      res.status(502).json({ error: err?.message ?? "Extraction failed" });
+      res.status(err?.status ?? 500).json({ error: err?.message ?? "Could not queue scrape" });
     }
   }
 );
 
 // Trigger the full cycle manually (owner only, for testing/catch-up)
 scrapingRouter.post("/run-now", requireRole("owner"), async (req, res) => {
-  const cycleResult = await runScrapingCycle(pool);
-  res.json(cycleResult);
+  const queued = await enqueueDueSources();
+  res.status(202).json({ queued });
 });
 
 // Manual price entry (for manual_only sources)

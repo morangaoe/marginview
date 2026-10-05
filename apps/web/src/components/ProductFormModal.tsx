@@ -14,6 +14,7 @@ const C = {
   accent: "var(--mv-accent, #3fae7a)",
   accentText: "var(--mv-accent-text, #06130d)",
   danger: "var(--mv-danger, #e5735f)",
+  warn: "var(--mv-warn, #e0b25a)",
 };
 
 export const primaryButtonStyle: React.CSSProperties = {
@@ -35,22 +36,40 @@ export const secondaryButtonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+const DEFAULT_CURRENCIES = ["USD", "EUR", "GBP", "AUD", "CAD", "NZD", "KES", "INR", "JPY"];
+const MAX_CATEGORY = 80;
+
 interface Props {
   mode: "add" | "edit";
-  /** Existing level when editing (SKU, name, category, cost are editable; stock is edited in the table). */
+  /** Existing level when editing. Stock is edited in the inventory table. */
   initial?: InventoryLevel;
   locations: Location[];
+  /** Category suggestions. Typing a name that isn't listed creates a new category. */
+  categories?: readonly string[];
+  /** Workspace default currency, used for new products. */
+  defaultCurrency?: string;
+  currencies?: string[];
   onClose: () => void;
   /** Resolve with an error message to show inline, or null on success. */
-  /** Second argument carries any competitor URLs added in the form (existing callers can ignore it). */
   onSubmit: (draft: ProductDraft, competitors: CompetitorEntry[]) => Promise<string | null>;
 }
 
-export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }: Props) {
+export function ProductFormModal({
+  mode,
+  initial,
+  locations,
+  categories = CATEGORIES,
+  defaultCurrency = "USD",
+  currencies = DEFAULT_CURRENCIES,
+  onClose,
+  onSubmit,
+}: Props) {
   const [sku, setSku] = useState(initial?.sku ?? "");
   const [name, setName] = useState(initial?.product_name ?? "");
-  const [category, setCategory] = useState(initial?.category ?? CATEGORIES[0]);
+  const [category, setCategory] = useState(initial?.category ?? categories[0] ?? "Other");
   const [cost, setCost] = useState(initial ? (initial.cost / 100).toFixed(2) : "");
+  const [price, setPrice] = useState(initial?.price != null ? (initial.price / 100).toFixed(2) : "");
+  const [currency, setCurrency] = useState((initial?.currency ?? defaultCurrency).toUpperCase());
   const [quantity, setQuantity] = useState(initial ? String(initial.quantity) : "0");
   const [reorder, setReorder] = useState(initial ? String(initial.reorder_level) : "10");
   const [locationId, setLocationId] = useState(initial?.location_id ?? locations[0]?.id ?? "");
@@ -59,13 +78,29 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
   const [saving, setSaving] = useState(false);
   const [competitors, setCompetitors] = useState<CompetitorEntry[]>([]);
 
+  const currencyOptions = currencies.includes(currency) ? currencies : [...currencies, currency];
+
+  // Live margin preview. Advisory only: a price below cost is allowed but flagged.
+  const costCents = dollarsToCents(cost);
+  const priceCents = price.trim() === "" ? null : dollarsToCents(price);
+  const marginPct = costCents && priceCents ? ((priceCents - costCents) / priceCents) * 100 : null;
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const errs: Record<string, string> = {};
     if (!sku.trim()) errs.sku = "SKU is required.";
     if (!name.trim()) errs.name = "Product name is required.";
-    const costCents = dollarsToCents(cost);
+
+    const cat = category.trim();
+    if (!cat) errs.category = "Category is required.";
+    else if (cat.length > MAX_CATEGORY) errs.category = `Keep categories under ${MAX_CATEGORY} characters.`;
+
     if (costCents === null || costCents <= 0) errs.cost = "Enter an amount greater than 0 (e.g. 12.50).";
+    if (price.trim() !== "" && (priceCents === null || priceCents <= 0)) {
+      errs.price = "Enter a price greater than 0, or leave it blank.";
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) errs.currency = "Choose a currency.";
+
     if (mode === "add") {
       if (!/^\d+$/.test(quantity)) errs.quantity = "Whole number, 0 or more.";
       if (!/^\d+$/.test(reorder)) errs.reorder = "Whole number, 0 or more.";
@@ -75,15 +110,20 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
 
     setSaving(true);
     setFormError(null);
-    const message = await onSubmit({
-      sku: sku.trim(),
-      name: name.trim(),
-      category,
-      cost_cents: costCents!,
-      quantity: Number(quantity),
-      reorder_level: Number(reorder),
-      location_id: locationId || undefined,
-    }, competitors);
+    const message = await onSubmit(
+      {
+        sku: sku.trim(),
+        name: name.trim(),
+        category: cat,
+        cost_cents: costCents!,
+        price_cents: priceCents,
+        currency,
+        quantity: Number(quantity),
+        reorder_level: Number(reorder),
+        location_id: locationId || undefined,
+      },
+      competitors,
+    );
     setSaving(false);
     if (message) setFormError(message);
     else onClose();
@@ -100,21 +140,42 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
     fontSize: 14,
   });
   const label: React.CSSProperties = { display: "block", color: C.muted, fontSize: 13, marginBottom: 4 };
-  const errText = (k: string) => errors[k] && <div style={{ color: C.danger, fontSize: 12, marginTop: 4 }}>{errors[k]}</div>;
+  const errText = (k: string) =>
+    errors[k] && <div style={{ color: C.danger, fontSize: 12, marginTop: 4 }}>{errors[k]}</div>;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label={mode === "add" ? "Add product" : "Edit product"}
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 50, padding: 16 }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "grid",
+        placeItems: "center",
+        zIndex: 50,
+        padding: 16,
+      }}
       onClick={onClose}
     >
       <form
         onSubmit={handleSubmit}
         onClick={(e) => e.stopPropagation()}
         noValidate
-        style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, width: "100%", maxWidth: 480, display: "grid", gap: 14 }}
+        style={{
+          background: C.surface,
+          color: C.text,
+          border: `1px solid ${C.border}`,
+          borderRadius: 10,
+          padding: 24,
+          width: "100%",
+          maxWidth: 480,
+          display: "grid",
+          gap: 14,
+          maxHeight: "90vh",
+          overflowY: "auto",
+        }}
       >
         <h2 style={{ margin: 0, fontSize: 18 }}>{mode === "add" ? "Add product" : "Edit product"}</h2>
 
@@ -128,18 +189,50 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
           <input id="pf-name" style={input(!!errors.name)} value={name} onChange={(e) => setName(e.target.value)} />
           {errText("name")}
         </div>
+
+        <div>
+          <label style={label} htmlFor="pf-cat">Category</label>
+          <input
+            id="pf-cat"
+            list="pf-cat-list"
+            style={input(!!errors.category)}
+            value={category}
+            placeholder="Pick one or type a new category"
+            onChange={(e) => setCategory(e.target.value)}
+          />
+          <datalist id="pf-cat-list">
+            {categories.map((c) => <option key={c} value={c} />)}
+          </datalist>
+          {errText("category")}
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div>
-            <label style={label} htmlFor="pf-cat">Category</label>
-            <select id="pf-cat" style={input(false)} value={category} onChange={(e) => setCategory(e.target.value)}>
-              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              {!(CATEGORIES as readonly string[]).includes(category) && <option value={category}>{category}</option>}
-            </select>
-          </div>
-          <div>
-            <label style={label} htmlFor="pf-cost">Cost price (USD)</label>
+            <label style={label} htmlFor="pf-cost">Cost price</label>
             <input id="pf-cost" inputMode="decimal" style={input(!!errors.cost)} value={cost} onChange={(e) => setCost(e.target.value)} />
             {errText("cost")}
+          </div>
+          <div>
+            <label style={label} htmlFor="pf-price">Selling price (optional)</label>
+            <input id="pf-price" inputMode="decimal" style={input(!!errors.price)} value={price} onChange={(e) => setPrice(e.target.value)} />
+            {errText("price")}
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={label} htmlFor="pf-currency">Currency</label>
+            <select id="pf-currency" style={input(!!errors.currency)} value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {currencyOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            {errText("currency")}
+          </div>
+          <div style={{ alignSelf: "end", color: C.muted, fontSize: 13, paddingBottom: 8 }}>
+            {marginPct !== null && (
+              <span style={{ color: marginPct < 0 ? C.warn : C.muted }}>
+                Margin {marginPct.toFixed(1)}%{marginPct < 0 ? " (below cost)" : ""}
+              </span>
+            )}
           </div>
         </div>
 
@@ -171,8 +264,13 @@ export function ProductFormModal({ mode, initial, locations, onClose, onSubmit }
         {/* Re-map the shared tokens so the competitor controls match this dark modal */}
         <div
           style={{
-            "--m-surface": C.surface, "--m-bg": C.field, "--m-border": C.border,
-            "--m-text": C.text, "--m-muted": C.muted, "--m-accent": C.accent, "--m-danger": C.danger,
+            "--m-surface": C.surface,
+            "--m-bg": C.field,
+            "--m-border": C.border,
+            "--m-text": C.text,
+            "--m-muted": C.muted,
+            "--m-accent": C.accent,
+            "--m-danger": C.danger,
           } as React.CSSProperties}
         >
           <CompetitorUrlInput value={competitors} onChange={setCompetitors} searchHint={name} />

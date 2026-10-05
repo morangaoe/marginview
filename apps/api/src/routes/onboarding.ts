@@ -1,10 +1,9 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
 import { pool } from "../db/pool";
 import { HttpError, wrap } from "../utils/http";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireRole, signToken } from "../middleware/auth";
 
 const router = Router();
 
@@ -14,9 +13,21 @@ const FREE_MAIL = new Set([
 ]);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const MAX_IMPORT_ROWS = 2000;
+const MAX_MARGIN_KEYS = 100;
+const MAX_SKIPPED_REPORTED = 50;
+
+/** "12", "12.5", "$1,200.50" -> integer cents. null if not a positive amount. */
+function toCents(v: unknown): number | null {
+  const cleaned = String(v ?? "").trim().replace(/[$,\s]/g, "");
+  if (!/^\d+(\.\d+)?$/.test(cleaned)) return null;
+  const cents = Math.round(Number(cleaned) * 100);
+  return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+}
+
 // ---------------------------------------------------------------------------
-// POST /api/onboarding/register
-// Public — creates or joins a workspace, returns a JWT.
+// POST /api/onboarding/register   (public)
+// Creates or joins a workspace and returns a JWT.
 // ---------------------------------------------------------------------------
 router.post(
   "/register",
@@ -24,9 +35,10 @@ router.post(
     const { email, password, fullName, mode, orgName, inviteCode, acceptTos } = req.body ?? {};
 
     const mail = String(email ?? "").trim().toLowerCase();
+    const name = String(fullName ?? "").trim();
     if (!EMAIL_RE.test(mail)) throw new HttpError(400, "Enter a valid email address.");
     if (String(password ?? "").length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
-    if (!String(fullName ?? "").trim()) throw new HttpError(400, "Enter your full name.");
+    if (!name) throw new HttpError(400, "Enter your full name.");
     if (mode !== "create" && mode !== "join") throw new HttpError(400, "Choose to create or join a workspace.");
     if (mode === "create" && !String(orgName ?? "").trim()) throw new HttpError(400, "Enter a workspace name.");
     if (mode === "create" && acceptTos !== true)
@@ -63,12 +75,11 @@ router.post(
         organizationId = org.rows[0].id;
         roleName = "owner";
 
-        // Every new org starts a Starter trial (idempotent if plan already exists)
+        // Every new org starts a Starter trial.
         const plan = await client.query(`select id from plans where name = 'Starter' limit 1`);
         if (plan.rowCount) {
           await client.query(
-            `insert into subscriptions (organization_id, plan_id, status) values ($1, $2, 'trialing')
-             on conflict do nothing`,
+            `insert into subscriptions (organization_id, plan_id, status) values ($1, $2, 'trialing')`,
             [organizationId, plan.rows[0].id],
           );
         }
@@ -85,13 +96,13 @@ router.post(
           );
         }
         organizationId = org.rows[0].id;
-        if (!code) status = "invited"; // domain match without code → pending
+        if (!code) status = "invited"; // domain match without a code -> pending approval
       }
 
       const user = await client.query(
         `insert into users (organization_id, email, password_hash, full_name, status)
          values ($1, $2, $3, $4, $5) returning id`,
-        [organizationId, mail, hash, String(fullName).trim(), status],
+        [organizationId, mail, hash, name, status],
       );
       const userId: string = user.rows[0].id;
 
@@ -109,19 +120,19 @@ router.post(
         });
       }
 
-      // FIX: Use consistent claim shape — must match what requireAuth reads.
-      const token = jwt.sign(
-        { sub: userId, id: userId, email: mail, organizationId, role: roleName },
-        process.env.JWT_SECRET!,
-        { expiresIn: "7d" },
-      );
+      // Same signer as /api/auth/login: one secret, one expiry, one claim shape.
+      const token = signToken({ id: userId, organizationId, role: roleName });
 
       return res.status(201).json({
         token,
-        user: { id: userId, email: mail, fullName, organizationId, role: roleName },
+        user: { id: userId, email: mail, fullName: name, organizationId, role: roleName },
       });
-    } catch (e) {
-      await client.query("rollback");
+    } catch (e: any) {
+      await client.query("rollback").catch(() => undefined);
+      // Two simultaneous sign-ups with the same email: the unique index wins.
+      if (e?.code === "23505") {
+        throw new HttpError(409, "An account with this email already exists. Log in instead.");
+      }
       throw e;
     } finally {
       client.release();
@@ -130,77 +141,158 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// POST /api/onboarding
-// Protected — called by the Onboarding.tsx wizard AFTER login/signup.
-// Creates a location, bulk-imports products, stores target margins.
-//
-// FIX: This route was MISSING. Onboarding.tsx calls POST /onboarding
-// with { location, rows, targetMargins } but no route existed to handle it.
+// GET /api/onboarding/status   (auth)
+// Tells the web app whether to send this user into the setup wizard.
+// Only workspace owners are ever required to complete it.
+// ---------------------------------------------------------------------------
+router.get(
+  "/status",
+  requireAuth,
+  wrap(async (req, res) => {
+    const orgId = req.user!.organizationId;
+    const r = await pool.query(
+      `select o.onboarding_completed_at,
+              o.metadata -> 'target_margins' as target_margins,
+              exists (select 1 from locations where organization_id = o.id) as has_location,
+              exists (select 1 from products  where organization_id = o.id and deleted_at is null) as has_products
+         from organizations o
+        where o.id = $1`,
+      [orgId],
+    );
+    if (!r.rowCount) throw new HttpError(404, "Workspace not found.");
+    const row = r.rows[0];
+    const completed = row.onboarding_completed_at !== null;
+
+    res.json({
+      completed,
+      required: req.user!.role === "owner" && !completed,
+      hasLocation: row.has_location,
+      hasProducts: row.has_products,
+      targetMargins: row.target_margins ?? {},
+    });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/onboarding/skip   (owner)
+// Lets an owner leave the wizard without setting anything up.
+// ---------------------------------------------------------------------------
+router.post(
+  "/skip",
+  requireAuth,
+  requireRole("owner"),
+  wrap(async (req, res) => {
+    await pool.query(
+      `update organizations
+          set onboarding_completed_at = coalesce(onboarding_completed_at, now()), updated_at = now()
+        where id = $1`,
+      [req.user!.organizationId],
+    );
+    res.json({ ok: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/onboarding   (owner)
+// Called by the wizard: creates the first location, optionally imports products,
+// stores target margins, and marks onboarding complete. All in one transaction.
+// Body: { location: string, rows?: [{sku,name,category,cost,price,quantity}], targetMargins?: {[category]: pct} }
 // ---------------------------------------------------------------------------
 router.post(
   "/",
   requireAuth,
+  requireRole("owner"),
   wrap(async (req, res) => {
     const { location, rows, targetMargins } = req.body ?? {};
     const orgId: string = req.user!.organizationId;
 
-    if (!String(location ?? "").trim()) {
-      throw new HttpError(400, "Provide a location name (e.g. 'Main warehouse').");
+    const locationName = String(location ?? "").trim();
+    if (!locationName) throw new HttpError(400, "Provide a location name (e.g. 'Main warehouse').");
+    if (locationName.length > 120) throw new HttpError(400, "Location name is too long.");
+
+    if (rows !== undefined && !Array.isArray(rows)) throw new HttpError(400, "rows must be a list.");
+    if (Array.isArray(rows) && rows.length > MAX_IMPORT_ROWS) {
+      throw new HttpError(413, `Too many products (max ${MAX_IMPORT_ROWS} per import).`);
+    }
+
+    // Validate margins up front so a bad value fails loudly instead of being dropped.
+    let margins: Record<string, number> | null = null;
+    if (targetMargins !== undefined && targetMargins !== null) {
+      if (typeof targetMargins !== "object" || Array.isArray(targetMargins)) {
+        throw new HttpError(400, "targetMargins must be an object of category → percent.");
+      }
+      const entries = Object.entries(targetMargins as Record<string, unknown>);
+      if (entries.length > MAX_MARGIN_KEYS) throw new HttpError(400, "Too many margin categories.");
+      margins = {};
+      for (const [cat, val] of entries) {
+        const n = Number(val);
+        if (!cat.trim() || cat.length > 80 || !Number.isFinite(n) || n < 0 || n > 99) {
+          throw new HttpError(400, `Target margin for "${cat}" must be between 0 and 99.`);
+        }
+        margins[cat.trim()] = n;
+      }
     }
 
     const client = await pool.connect();
     try {
       await client.query("begin");
 
-      // 1. Create the first location
+      // 1. First location. Upsert on (organization_id, name): no duplicates on retry.
       const loc = await client.query(
-        `insert into locations (organization_id, name)
-         values ($1, $2)
-         on conflict do nothing
+        `insert into locations (organization_id, name) values ($1, $2)
+         on conflict (organization_id, name) do update set updated_at = now()
          returning id`,
-        [orgId, String(location).trim()],
+        [orgId, locationName],
       );
+      const locationId: string = loc.rows[0].id;
 
-      // If the org already had this exact location name, fetch it
-      let locationId: string;
-      if (loc.rowCount) {
-        locationId = loc.rows[0].id;
-      } else {
-        const existing = await client.query(
-          "select id from locations where organization_id = $1 and name = $2 limit 1",
-          [orgId, String(location).trim()],
-        );
-        locationId = existing.rows[0]?.id;
-        if (!locationId) throw new HttpError(500, "Could not create or find location.");
-      }
-
-      // 2. Bulk-import products (optional — user may skip the CSV step)
+      // 2. Optional product import. Rows that can't be imported are reported, not silently dropped.
       let created = 0;
+      const skipped: { row: number; sku?: string; reason: string }[] = [];
+      let skippedCount = 0;
+      const skip = (row: number, sku: string | undefined, reason: string) => {
+        skippedCount++;
+        if (skipped.length < MAX_SKIPPED_REPORTED) skipped.push({ row, sku, reason });
+      };
+
       if (Array.isArray(rows) && rows.length > 0) {
-        for (const r of rows) {
-          const sku = String(r.sku ?? "").trim();
-          const name = String(r.name ?? "").trim();
-          if (!sku || !name) continue;
-
-          const costRaw = parseFloat(String(r.cost ?? "0").replace(/[^0-9.]/g, ""));
-          const costCents = Number.isFinite(costRaw) && costRaw > 0 ? Math.round(costRaw * 100) : 0;
-          const quantity = Math.max(0, parseInt(String(r.quantity ?? "0"), 10) || 0);
-          const priceRaw = parseFloat(String(r.price ?? "0").replace(/[^0-9.]/g, ""));
-          const priceCents = Number.isFinite(priceRaw) && priceRaw > 0 ? Math.round(priceRaw * 100) : null;
-          const category = String(r.category ?? "General").trim() || "General";
-
-          // Skip duplicate SKUs silently (idempotent import)
-          const exists = await client.query(
-            `select v.id from product_variants v
+        const candidateSkus = rows
+          .map((r: any) => String(r?.sku ?? "").trim())
+          .filter(Boolean);
+        const existing = await client.query(
+          `select v.sku from product_variants v
              join products p on p.id = v.product_id
-             where p.organization_id = $1 and v.sku = $2 and v.deleted_at is null limit 1`,
-            [orgId, sku],
-          );
-          if (exists.rowCount) continue;
+            where p.organization_id = $1 and v.sku = any($2::text[])
+              and v.deleted_at is null and p.deleted_at is null`,
+          [orgId, candidateSkus],
+        );
+        const taken = new Set<string>(existing.rows.map((r: any) => r.sku));
+
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i] ?? {};
+          const rowNo = i + 2; // +1 header, +1 for 1-based numbering
+          const sku = String(r.sku ?? "").trim();
+          const pname = String(r.name ?? "").trim();
+          if (!sku) { skip(rowNo, undefined, "Missing SKU"); continue; }
+          if (!pname) { skip(rowNo, sku, "Missing product name"); continue; }
+          if (taken.has(sku)) { skip(rowNo, sku, "SKU already exists or repeats in this file"); continue; }
+
+          const costCents = toCents(r.cost);
+          if (costCents === null) { skip(rowNo, sku, "Cost must be an amount greater than 0"); continue; }
+
+          const priceRaw = String(r.price ?? "").trim();
+          const priceCents = priceRaw ? toCents(priceRaw) : null;
+          if (priceRaw && priceCents === null) { skip(rowNo, sku, "Price is not a valid amount"); continue; }
+
+          const qtyRaw = String(r.quantity ?? "").trim();
+          const quantity = qtyRaw === "" ? 0 : /^\d+$/.test(qtyRaw) ? Number(qtyRaw) : null;
+          if (quantity === null) { skip(rowNo, sku, "Quantity must be a whole number"); continue; }
+
+          const category = String(r.category ?? "").trim() || "General";
 
           const prod = await client.query(
             "insert into products (organization_id, name, category) values ($1, $2, $3) returning id",
-            [orgId, name, category],
+            [orgId, pname, category],
           );
           const variant = await client.query(
             `insert into product_variants (product_id, sku, unit_cost_cents, current_price_cents)
@@ -212,29 +304,28 @@ router.post(
              values ($1, $2, $3, 0)`,
             [variant.rows[0].id, locationId, quantity],
           );
+          taken.add(sku); // repeats later in the same file are skipped
           created++;
         }
       }
 
-      // 3. Persist target margins as org-level settings (stored in org metadata)
-      //    Using a simple JSONB update; adjust column name if your schema differs.
-      if (targetMargins && typeof targetMargins === "object") {
-        await client.query(
-          `update organizations
-           set metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('target_margins', $2::jsonb),
-               updated_at = now()
-           where id = $1`,
-          [orgId, JSON.stringify(targetMargins)],
-        ).catch(() => {
-          // Non-fatal: target_margins are a UX convenience, not critical data.
-          // If the organizations table has no metadata column yet, skip silently.
-        });
-      }
+      // 3. Settings + completion flag. No swallowed errors: a failure here rolls everything back.
+      await client.query(
+        `update organizations
+            set metadata = case
+                  when $2::jsonb is null then metadata
+                  else metadata || jsonb_build_object('target_margins', $2::jsonb)
+                end,
+                onboarding_completed_at = coalesce(onboarding_completed_at, now()),
+                updated_at = now()
+          where id = $1`,
+        [orgId, margins ? JSON.stringify(margins) : null],
+      );
 
       await client.query("commit");
-      res.status(201).json({ locationId, productsImported: created });
+      res.status(201).json({ locationId, productsImported: created, skippedCount, skipped });
     } catch (e) {
-      await client.query("rollback");
+      await client.query("rollback").catch(() => undefined);
       throw e;
     } finally {
       client.release();

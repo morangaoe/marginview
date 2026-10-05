@@ -25,6 +25,10 @@ export interface InventoryLevel {
   product_name: string;
   category: string;
   cost: number;
+  /** Selling price in cents, or null if none set. */
+  price: number | null;
+  /** ISO currency of cost and price, e.g. "USD". */
+  currency: string;
   location_id: string;
   location_name: string;
   quantity: number;
@@ -39,6 +43,10 @@ export interface ProductDraft {
   cost_cents: number;
   quantity: number;
   reorder_level: number;
+  /** Optional selling price in cents. null/absent = no price set yet. */
+  price_cents?: number | null;
+  /** 3-letter ISO code. Omit to use the workspace default. */
+  currency?: string;
   location_id?: string;
 }
 
@@ -54,15 +62,16 @@ export function statusFor(level: Pick<InventoryLevel, "quantity" | "reorder_leve
 // CSV
 // ---------------------------------------------------------------------------
 
-export const REQUIRED_CSV_COLUMNS = [
-  "SKU",
-  "Product Name",
-  "Category",
-  "Cost Price",
-  "Stock Quantity",
-  "Reorder Level",
-] as const;
-export type CSVFieldKey = (typeof REQUIRED_CSV_COLUMNS)[number];
+/** Must be present (under any recognised header name). */
+export const REQUIRED_CSV_COLUMNS = ["SKU", "Product Name", "Cost Price"] as const;
+/** Optional: blank cells fall back to defaults (Other / no price / 0 / 0). */
+export const OPTIONAL_CSV_COLUMNS = ["Category", "Selling Price", "Stock Quantity", "Reorder Level"] as const;
+export const ALL_CSV_COLUMNS = [...REQUIRED_CSV_COLUMNS, ...OPTIONAL_CSV_COLUMNS] as const;
+export type CSVFieldKey = (typeof ALL_CSV_COLUMNS)[number];
+
+/** Limits shared by the uploader and the server. */
+export const CSV_MAX_ROWS = 2000;
+export const CSV_MAX_BYTES = 5 * 1024 * 1024;
 
 export interface CSVRow {
   rowNumber: number;
@@ -70,6 +79,7 @@ export interface CSVRow {
   "Product Name"?: string;
   Category?: string;
   "Cost Price"?: string;
+  "Selling Price"?: string;
   "Stock Quantity"?: string;
   "Reorder Level"?: string;
 }
@@ -82,9 +92,21 @@ export interface CSVFieldError {
 export interface CSVValidatedRow {
   rowNumber: number;
   raw: CSVRow;
-  /** Present only when the row has zero errors. Cost is already in cents. */
+  /** Present only when the row has zero errors. Money is already in cents. */
   parsed: ProductDraft | null;
   errors: CSVFieldError[];
+  /** True when the SKU is already in the catalog (a hint; the server is authoritative). */
+  existing: boolean;
+}
+
+export type ImportMode = "skip" | "update";
+
+export interface BulkImportResponse {
+  created: number;
+  updated: number;
+  skipped: number;
+  location_id: string;
+  skipped_rows: { row: number; sku?: string; reason: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +134,7 @@ export interface OptimizedPricingResponse {
   weights_input: PricingWeights;
   weights_normalized: PricingWeights;
   weights_balanced: boolean;
-  baselines: Record<keyof PricingWeights, { price_cents: number; margin_percent: number }>;
+  baselines: Record<keyof PricingWeights, { price_cents: number; margin_percent: number; warning?: string | null }>;
   optimized_price_cents: number;
   margin_percent: number;
 }
@@ -180,6 +202,10 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
   return body as T;
 }
 
-export function formatCents(cents: number): string {
-  return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+export function formatCents(cents: number, currency = "USD"): string {
+  try {
+    return (cents / 100).toLocaleString("en-US", { style: "currency", currency });
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${currency}`; // unknown currency code
+  }
 }

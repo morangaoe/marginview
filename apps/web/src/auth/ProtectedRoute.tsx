@@ -1,23 +1,54 @@
+import { useEffect, useState } from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { request } from "../lib/useApi";
 import { useAuth } from "./AuthContext";
 
 /**
- * FIX: The original ProtectedRoute silently redirected unauthenticated users
- * to /login without preserving where they were trying to go. After login they
- * always landed on /app instead of their original destination.
+ * 1. Unauthenticated users go to /login and come back to where they were headed.
+ * 2. Workspace owners who haven't finished (or skipped) setup are sent to
+ *    /app/onboarding. The server decides via GET /api/onboarding/status, so a
+ *    stale JWT can't trigger a redirect loop.
  *
- * This version:
- *  1. Preserves the intended path via location state so Login can redirect back.
- *  2. Detects brand-new users (no products yet) and redirects them to /app/onboarding
- *     — the flag is set in AuthContext when the JWT contains `newUser: true`.
+ * If the status call fails we let the user through rather than locking them out.
+ * The wizard fires "mv:onboarding-complete" when it finishes so we stop redirecting.
  */
 export function ProtectedRoute() {
   const { token } = useAuth();
   const location = useLocation();
+  const [required, setRequired] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!token) {
+      setRequired(null);
+      return;
+    }
+    let cancelled = false;
+    request<{ required: boolean }>("/onboarding/status")
+      .then((r) => !cancelled && setRequired(r.required))
+      .catch(() => !cancelled && setRequired(false));
+
+    const onDone = () => setRequired(false);
+    window.addEventListener("mv:onboarding-complete", onDone);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("mv:onboarding-complete", onDone);
+    };
+  }, [token]);
 
   if (!token) {
-    // Pass the current path so Login.tsx can navigate back after successful login
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  if (required === null) {
+    return (
+      <div className="mv-page">
+        <p className="mv-sub">Loading…</p>
+      </div>
+    );
+  }
+
+  if (required && !location.pathname.startsWith("/app/onboarding")) {
+    return <Navigate to="/app/onboarding" replace />;
   }
 
   return <Outlet />;

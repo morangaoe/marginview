@@ -201,14 +201,17 @@ export function Dashboard() {
         <div className="card">
           <strong style={{ display: "block", marginBottom: 14, fontSize: 14 }}>Quick actions</strong>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <Link to="/app/pricing" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
-              📊 Review a pricing strategy
+            <Link to="/app/pricing" className="btn mv-quick-action">
+              <span className="material-symbols-rounded mv-quick-action-icon" aria-hidden="true">monitoring</span>
+              <span>Review a pricing strategy</span>
             </Link>
-            <Link to="/app/procurement" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
-              📦 Create a purchase order
+            <Link to="/app/procurement" className="btn mv-quick-action">
+              <span className="material-symbols-rounded mv-quick-action-icon" aria-hidden="true">inventory_2</span>
+              <span>Create a purchase order</span>
             </Link>
-            <Link to="/app/settings" className="btn" style={{ fontSize: 13, display: "block", textAlign: "center", textDecoration: "none" }}>
-              ⚙️ Settings & tracked competitors
+            <Link to="/app/settings/competitor-sources" className="btn mv-quick-action">
+              <span className="material-symbols-rounded mv-quick-action-icon" aria-hidden="true">tune</span>
+              <span>Settings &amp; tracked competitors</span>
             </Link>
           </div>
         </div>

@@ -1,3 +1,202 @@
+.mv-quick-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 40px;
+  text-align: left;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.mv-quick-action-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--accent);
+  font-size: 20px;
+  line-height: 1;
+  font-variation-settings: "FILL" 0, "wght" 350, "GRAD" 0, "opsz" 20;
+}
+
+.mv-quick-action:hover .mv-quick-action-icon {
+  font-variation-settings: "FILL" 0, "wght" 550, "GRAD" 40, "opsz" 20;
+}
+
+.mv-assistant-launcher {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid rgba(74, 222, 128, .4);
+  border-radius: 999px;
+  background: rgba(12, 22, 16, .94);
+  color: #eaf7ee;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .34), 0 0 22px rgba(74, 222, 128, .1);
+  backdrop-filter: blur(18px);
+  font: 600 13px var(--font-ui);
+  cursor: pointer;
+  transition: border-color .18s, background .18s, transform .18s, box-shadow .18s;
+}
+.mv-assistant-launcher:hover {
+  transform: translateY(-2px);
+  border-color: var(--g-400);
+  background: rgba(17, 34, 23, .98);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .4), 0 0 26px rgba(74, 222, 128, .18);
+}
+.mv-assistant-launcher .material-symbols-rounded { color: var(--g-300); font-size: 20px; }
+
+.mv-assistant-panel {
+  position: fixed;
+  z-index: 60;
+  left: 18px;
+  bottom: 74px;
+  display: flex;
+  flex-direction: column;
+  width: min(390px, calc(100vw - 36px));
+  height: min(590px, calc(100dvh - 108px));
+  min-height: 300px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-radius: 14px;
+  background: rgba(12, 16, 14, .97);
+  color: var(--ink);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .54), 0 0 28px rgba(74, 222, 128, .07);
+  backdrop-filter: blur(24px) saturate(150%);
+}
+.mv-assistant-header {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+.mv-assistant-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mv-assistant-heading strong { display: block; font-size: 14px; }
+.mv-assistant-caption { color: var(--slate); font-size: 11px; margin-top: 1px; }
+.mv-assistant-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border: 1px solid rgba(74, 222, 128, .22);
+  border-radius: 10px;
+  background: rgba(74, 222, 128, .09);
+  color: var(--g-300);
+  font-size: 19px;
+}
+.mv-assistant-tools { display: flex; gap: 5px; }
+.mv-assistant-tools button, .mv-assistant-composer button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--slate);
+  cursor: pointer;
+}
+.mv-assistant-tools button:hover { border-color: var(--hairline); background: rgba(255, 255, 255, .05); color: var(--ink); }
+.mv-assistant-tools .material-symbols-rounded { font-size: 19px; }
+.mv-assistant-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 13px;
+  overflow: auto;
+  padding: 16px 13px;
+  overscroll-behavior: contain;
+}
+.mv-assistant-message { display: flex; align-items: flex-start; gap: 8px; }
+.mv-assistant-message.user { justify-content: flex-end; }
+.mv-assistant-avatar {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  margin-top: 2px;
+  border-radius: 8px;
+  background: rgba(74, 222, 128, .1);
+  color: var(--g-300);
+  font-size: 15px;
+}
+.mv-assistant-bubble-wrap { display: grid; gap: 4px; max-width: 85%; }
+.mv-assistant-bubble {
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 4px 12px 12px 12px;
+  background: rgba(255, 255, 255, .055);
+  color: #e9eee9;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mv-assistant-message.user .mv-assistant-bubble {
+  border-color: rgba(74, 222, 128, .2);
+  border-radius: 12px 4px 12px 12px;
+  background: rgba(34, 110, 61, .42);
+}
+.mv-assistant-source { color: var(--slate); font-size: 10px; padding-inline: 3px; }
+.mv-assistant-thinking { color: var(--slate); animation: assistant-pulse 1.2s ease-in-out infinite alternate; }
+@keyframes assistant-pulse { to { opacity: .58; } }
+.mv-assistant-suggestions { display: grid; gap: 7px; padding-left: 33px; }
+.mv-assistant-suggestions > span { margin-bottom: 1px; color: var(--slate); font-size: 11px; }
+.mv-assistant-suggestions button {
+  justify-self: start;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .025);
+  color: #dbe5dc;
+  font: 12px var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.mv-assistant-suggestions button:hover { border-color: rgba(74, 222, 128, .35); background: rgba(74, 222, 128, .07); }
+.mv-assistant-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 7px 13px;
+  border-top: 1px solid var(--hairline);
+}
+.mv-assistant-composer input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 13px var(--font-ui);
+  box-shadow: none;
+}
+.mv-assistant-composer input:focus { border: 0; outline: 0; box-shadow: none; }
+.mv-assistant-composer input::placeholder { color: #777f79; }
+.mv-assistant-composer button {
+  background: var(--g-400);
+  color: #07110a;
+}
+.mv-assistant-composer button:hover:not(:disabled) { background: var(--g-300); }
+.mv-assistant-composer button:disabled { opacity: .4; cursor: not-allowed; }
+.mv-assistant-footnote { min-height: 24px; padding: 0 13px 8px; color: var(--slate); font-size: 10px; }
+.mv-assistant-footnote [role="alert"] { color: var(--critical); }
+
 @media (max-width: 768px) {
   .app-nav {
     position: fixed;
@@ -26,5 +225,12 @@
   main {
     padding: 16px !important;
     padding-bottom: 80px !important;
+  }
+  .mv-assistant-launcher { left: 12px; bottom: 76px; }
+  .mv-assistant-panel {
+    left: 10px;
+    bottom: 130px;
+    width: calc(100vw - 20px);
+    height: min(540px, calc(100dvh - 156px));
   }
 }

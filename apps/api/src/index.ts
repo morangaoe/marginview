@@ -9,14 +9,19 @@ import { adminRouter } from "./routes/admin";
 import { assistantRouter } from "./routes/assistant";
 import { authRouter } from "./routes/auth";
 import { billingRouter } from "./routes/billing";
+import competitorsRouter from "./routes/competitors";
 import inventoryRouter from "./routes/inventory";
+import onboardingRouter from "./routes/onboarding";
 import pricingRouter from "./routes/pricing";
 import pricingApplyRouter from "./routes/pricingApply";
 import { procurementRouter } from "./routes/procurement";
 import productsRouter from "./routes/products";
+import searchRouter from "./routes/search";
+import scraperRouter from "./routes/scraper";
 import { scrapingRouter } from "./routes/scraping";
 import { suppliersRouter } from "./routes/suppliers";
 import { startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
+import { HttpError } from "./utils/http";
 
 const app = express();
 
@@ -47,12 +52,16 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Public
 app.use("/api/auth", authRouter);
+app.use("/api/onboarding", onboardingRouter);
 
 // Protected: these three routers read req.user, so requireAuth must run first.
 app.use("/api/products", requireAuth, productsRouter);
 app.use("/api/inventory", requireAuth, inventoryRouter);
 app.use("/api/pricing", requireAuth, pricingRouter);
 app.use("/api/pricing", requireAuth, pricingApplyRouter);
+app.use("/api/search", requireAuth, searchRouter);
+app.use("/api/competitors", requireAuth, competitorsRouter);
+app.use("/api/scraper", requireAuth, scraperRouter);
 
 // These apply requireAuth inside the router themselves.
 app.use("/api/procurement", procurementRouter);
@@ -69,6 +78,9 @@ app.use("/api", (req, res) => {
 
 // Centralized error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message });
+  }
   if (err?.type === "entity.too.large" || err?.status === 413) {
     return res.status(413).json({ error: "Request is too large. Try uploading fewer rows at a time." });
   }

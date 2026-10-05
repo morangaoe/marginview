@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
+import { requireRole } from "../middleware/auth";
 import { HttpError, orgIdOf, wrap } from "../utils/http";
+import { checkCompliance } from "../services/scraping/complianceCheck";
 
 const router = Router();
 
@@ -37,6 +39,7 @@ router.get(
 /** POST /api/competitors { variantId, competitorName, url } */
 router.post(
   "/",
+  requireRole("owner", "pricing_manager"),
   wrap(async (req, res) => {
     const orgId = orgIdOf(req);
     const { variantId, competitorName, url } = req.body ?? {};
@@ -49,14 +52,15 @@ router.post(
     }
     await assertVariantInOrg(String(variantId), orgId);
     const name = String(competitorName ?? "").trim() || parsed.hostname.replace(/^www\./, "");
+    const complianceStatus = await checkCompliance(parsed.toString());
 
     const client = await pool.connect();
     try {
       await client.query("begin");
       const src = await client.query(
-        `insert into scraping_sources (organization_id, url) values ($1, $2)
+        `insert into scraping_sources (organization_id, url, compliance_status) values ($1, $2, $3)
          on conflict (organization_id, url) do update set updated_at = now() returning id`,
-        [orgId, parsed.toString()],
+        [orgId, parsed.toString(), complianceStatus],
       );
       const cp = await client.query(
         `insert into competitor_products (product_variant_id, scraping_source_id, competitor_name)
@@ -78,6 +82,7 @@ router.post(
 
 router.delete(
   "/:id",
+  requireRole("owner", "pricing_manager"),
   wrap(async (req, res) => {
     const r = await pool.query(
       `delete from competitor_products cp using product_variants pv, products p

@@ -101,7 +101,14 @@ export default function Inventory() {
     try {
       await apiJson(`/api/products/${level.variant_id}`, {
         method: "PATCH",
-        body: JSON.stringify({ sku: draft.sku, name: draft.name, category: draft.category, cost_cents: draft.cost_cents }),
+        body: JSON.stringify({
+          sku: draft.sku,
+          name: draft.name,
+          category: draft.category,
+          cost_cents: draft.cost_cents,
+          price_cents: draft.price_cents,
+          currency: draft.currency,
+        }),
       });
       if (competitors.length) await saveCompetitorTargets(level.variant_id, competitors);
       await load();

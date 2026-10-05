@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { pool } from "../db/pool";
+import { requireRole } from "../middleware/auth";
 import { enqueueScrape } from "../queues/scrapeQueue";
 import { HttpError, orgIdOf, wrap } from "../utils/http";
 
@@ -8,6 +9,7 @@ const router = Router();
 /** POST /api/scraper/run { sourceId }  ->  202 { jobId } */
 router.post(
   "/run",
+  requireRole("owner", "pricing_manager"),
   wrap(async (req, res) => {
     const sourceId = String(req.body?.sourceId ?? "");
     if (!sourceId) throw new HttpError(400, "sourceId is required.");

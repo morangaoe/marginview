@@ -5,8 +5,9 @@
  * Requires Node 20.3+ (AbortSignal.any).
  */
 import { extractPrice, type ExtractOptions, type ExtractedPrice } from "./priceExtractor";
+import { fetchHtmlViaBrowser } from "./brightDataClient";
 
-export type ScrapeMethod = "direct" | "api_basic" | "api_rendered" | "api_premium";
+export type ScrapeMethod = "direct" | "api_basic" | "api_rendered" | "api_premium" | "bright_data_browser";
 export interface ScrapeResult extends ExtractedPrice {
   method: ScrapeMethod;
 }
@@ -81,6 +82,7 @@ interface Tier {
 export async function scrapePrice(url: string, opts: ScrapeOptions = {}): Promise<ScrapeResult> {
   const { signal, ...extract } = opts;
   const hasProvider = !!process.env.SCRAPING_API_KEY;
+  const hasBrightData = !!process.env.BRIGHTDATA_WS_ENDPOINT;
   let blocked = false;
 
   const tiers: Tier[] = [
@@ -99,6 +101,11 @@ export async function scrapePrice(url: string, opts: ScrapeOptions = {}): Promis
       method: "api_premium",
       run: () => fetchViaProvider(url, { render: true, premium: true }, signal),
       when: () => hasProvider && blocked,
+    },
+    {
+      method: "bright_data_browser",
+      run: () => fetchHtmlViaBrowser(url),
+      when: () => hasBrightData,
     },
   ];
 

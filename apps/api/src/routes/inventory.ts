@@ -29,6 +29,7 @@ const LEVELS_SQL = `
          l.name                        AS location_name,
          il.on_hand                    AS quantity,
          il.reorder_point              AS reorder_level,
+         p.created_at,
          CASE
            WHEN il.on_hand = 0 THEN 'out_of_stock'
            WHEN il.on_hand <= il.reorder_point THEN 'low'
@@ -41,7 +42,7 @@ const LEVELS_SQL = `
     JOIN locations l ON l.id = il.location_id
    WHERE p.organization_id = $1 AND l.organization_id = $1
      AND v.deleted_at IS NULL AND p.deleted_at IS NULL
-   ORDER BY p.name, v.sku, l.name
+  ORDER BY p.created_at DESC, p.name, v.sku, l.name
 `;
 
 const UPDATE_LEVEL_SQL = `

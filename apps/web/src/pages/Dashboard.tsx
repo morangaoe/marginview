@@ -7,11 +7,13 @@ import { useAuth } from "../auth/AuthContext";
 
 interface InventoryRow {
   id: string;
+  variant_id: string;
   sku: string;
-  name: string;
+  product_name: string;
   status: string;
-  on_hand: number;
+  quantity: number;
   location_name: string;
+  created_at: string;
 }
 
 interface Suggestion {
@@ -64,6 +66,9 @@ export function Dashboard() {
 
   const outOfStock = inventory?.filter(r => r.status === "out_of_stock") ?? [];
   const lowStock   = inventory?.filter(r => r.status === "low") ?? [];
+  const products = inventory
+    ? [...new Map(inventory.map((row) => [row.variant_id, row])).values()]
+    : [];
   const spikes     = sources?.filter(s => s.validation_flag === "out_of_band") ?? [];
   const failedSources = sources?.filter(s => s.last_status === "failed") ?? [];
 
@@ -78,6 +83,11 @@ export function Dashboard() {
 
       {/* Stat row */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 20 }}>
+        <StatCard
+          label="Products tracked"
+          value={inventory === null ? "—" : products.length}
+          sub="In your catalog"
+        />
         <StatCard
           label="Out of stock"
           value={outOfStock.length}
@@ -105,26 +115,24 @@ export function Dashboard() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
-        {/* Inventory alerts */}
+        {/* Recent products */}
         <div className="card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <strong style={{ fontSize: 14 }}>Inventory alerts</strong>
+            <strong style={{ fontSize: 14 }}>Recent products</strong>
             <Link to="/app/inventory" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
           </div>
           {inventory === null && <SkeletonRows rows={3} />}
           {inventory?.length === 0 && <p style={{ color: "var(--slate)", fontSize: 13 }}>No products yet.</p>}
-          {[...outOfStock, ...lowStock].length === 0 && inventory !== null && inventory.length > 0 && (
-            <p style={{ color: "var(--success)", fontSize: 13 }}>✓ All inventory levels are healthy.</p>
-          )}
-          {[...outOfStock, ...lowStock].map(row => (
+          {products.slice(0, 5).map(row => (
             <div key={row.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--hairline)" }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{row.name}</div>
-                <div style={{ fontSize: 11, color: "var(--slate)" }}>{row.sku} · {row.location_name} · {row.on_hand} on hand</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{row.product_name}</div>
+                <div style={{ fontSize: 11, color: "var(--slate)" }}>{row.sku} · {row.location_name} · {row.quantity} on hand</div>
               </div>
               <StatusPill status={row.status} />
             </div>
           ))}
+          {products.length > 5 && <p style={{ color: "var(--slate)", fontSize: 12 }}>Showing 5 of {products.length} products.</p>}
         </div>
 
         {/* Procurement suggestions */}

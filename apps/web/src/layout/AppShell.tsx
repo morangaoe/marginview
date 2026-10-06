@@ -8,6 +8,7 @@ const NAV_TABS: { to: string; label: string; module: ModuleKey; end?: boolean }[
   { to: "/app", label: "Dashboard", module: "dashboard", end: true },
   { to: "/app/inventory", label: "Inventory", module: "inventory" },
   { to: "/app/pricing", label: "Pricing", module: "pricing" },
+  { to: "/app/competitors", label: "Competitors", module: "pricing" },
   { to: "/app/procurement", label: "Procurement", module: "procurement" },
   { to: "/app/billing", label: "Billing", module: "billing" },
 ];

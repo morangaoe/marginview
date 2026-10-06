@@ -21,6 +21,8 @@ import searchRouter from "./routes/search";
 import scraperRouter from "./routes/scraper";
 import { scrapingRouter } from "./routes/scraping";
 import { suppliersRouter } from "./routes/suppliers";
+import { integrationsRouter } from "./routes/integrations";
+import { aiRouter } from "./routes/ai";
 import { startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
 import { HttpError } from "./utils/http";
 
@@ -63,6 +65,14 @@ app.use("/api/pricing", requireAuth, pricingApplyRouter);
 app.use("/api/search", requireAuth, searchRouter);
 app.use("/api/competitors", requireAuth, competitorsRouter);
 app.use("/api/scraper", requireAuth, scraperRouter);
+
+// BUG FIX: mount AI routes with requireAuth at the call site, matching
+// the convention used by every other protected route in this file. The
+// pasted spec omitted requireAuth here, which would work (both routers
+// apply it internally), but breaks the pattern and risks a regression
+// if someone later removes the internal middleware.
+app.use("/api/integrations", requireAuth, integrationsRouter);
+app.use("/api/ai", requireAuth, aiRouter);
 
 // These apply requireAuth inside the router themselves.
 app.use("/api/procurement", requireAuth, requireModule("procurement"), procurementRouter);

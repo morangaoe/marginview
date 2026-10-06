@@ -7,6 +7,7 @@ import {
   type OptimizedPricingResponse,
   type PricingWeights,
 } from "../types/inventory";
+import { api } from "../api/client";
 import { dollarsToCents } from "../utils/csvParser";
 import { useAuth } from "../auth/AuthContext";
 import { useMv } from "../lib/mv";
@@ -57,6 +58,18 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
   const { user } = useAuth();
   const canApply = user?.role === "owner" || user?.role === "pricing_manager";
   const ctx = useMv<PricingContext>(`/api/pricing/${variantId}/context`);
+
+  // AI weight advisor
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiRec, setAiRec] = useState<{ weights: PricingWeights; confidence: string; reasoning: string; risks: string[] } | null>(null);
+  const [aiErr, setAiErr] = useState<string | null>(null);
+
+  async function suggest() {
+    setAiBusy(true); setAiErr(null);
+    try { setAiRec(await api.post(`/ai/weights/${variantId}`)); }
+    catch (e) { setAiErr(e instanceof Error ? e.message : "Could not get a suggestion."); }
+    finally { setAiBusy(false); }
+  }
 
   // Reset the editable price points when a different variant is selected.
   useEffect(() => {
@@ -176,6 +189,28 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
           <input type="checkbox" checked={adaptive} onChange={(e) => setAdaptive(e.target.checked)} />
           Adapt weights to data
         </label>
+      </div>
+
+      {/* AI weight suggestion */}
+      <div style={{ display: "grid", gap: 8 }}>
+        <div className="mv-row">
+          <button type="button" className="mv-btn" onClick={suggest} disabled={aiBusy || !canApply}>
+            {aiBusy ? "Analyzing…" : "✨ Suggest weights with AI"}
+          </button>
+          {!canApply && <span className="mv-muted">Owners and pricing managers only.</span>}
+        </div>
+        {aiErr && <p className="mv-err" role="alert">{aiErr}</p>}
+        {aiRec && (
+          <div style={{ border: `1px solid ${BORDER}`, borderRadius: 10, padding: 14, display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 13 }}>
+              Suggested: {(Object.keys(LABELS) as (keyof PricingWeights)[]).map((k) => `${LABELS[k]} ${aiRec.weights[k]}%`).join(" · ")}
+              <span className="pill info" style={{ marginLeft: 8 }}>{aiRec.confidence} confidence</span>
+            </div>
+            <div style={{ fontSize: 13, color: MUTED }}>{aiRec.reasoning}</div>
+            {aiRec.risks.length > 0 && <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: MUTED }}>{aiRec.risks.map((r) => <li key={r}>{r}</li>)}</ul>}
+            <div><button type="button" className="mv-btn primary" onClick={() => { setWeights(aiRec.weights); setAiRec(null); }}>Use these weights</button></div>
+          </div>
+        )}
       </div>
 
       <div style={{ display: "grid", gap: 12 }}>

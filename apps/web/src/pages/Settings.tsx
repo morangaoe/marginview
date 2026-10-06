@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { usePlanAccess } from "../plan/PlanContext";
 import DataConnectors from "../components/settings/DataConnectors";
+import AiIntegrations from "../components/settings/AiIntegrations";
 
 interface OrgInfo {
   id: string;
@@ -38,7 +39,7 @@ interface ScrapingSource {
   validation_flag: string | null;
 }
 
-type Tab = "org" | "locations" | "suppliers" | "scraping" | "connectors";
+type Tab = "org" | "locations" | "suppliers" | "scraping" | "connectors" | "ai";
 
 function money(cents: number, currency = "USD") {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
@@ -150,6 +151,7 @@ export function Settings() {
     ...(can("procurement") ? [{ key: "suppliers" as Tab, label: "Suppliers" }] : []),
     { key: "scraping", label: "Tracked competitors" },
     ...(showConnectors ? [{ key: "connectors" as Tab, label: can("integrations") ? "Integrations" : "Data connectors" }] : []),
+    { key: "ai" as Tab, label: "AI & API keys" },
   ];
 
   return (
@@ -373,6 +375,7 @@ export function Settings() {
         </div>
       )}
       {tab === "connectors" && showConnectors && <DataConnectors enterprise={can("integrations")} />}
+      {tab === "ai" && <AiIntegrations isOwner={isOwner} />}
     </div>
   );
 }

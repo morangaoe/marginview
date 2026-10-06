@@ -25,6 +25,7 @@ import CompetitorSources from "./pages/CompetitorSources";
 import Notifications from "./pages/Notifications";
 import Onboarding from "./pages/Onboarding";
 import Contact from "./pages/Contact";
+import Competitors from "./pages/Competitors";
 import { RequireModule } from "./plan/RequireModule";
 
 export function App() {
@@ -52,6 +53,7 @@ export function App() {
           <Route path="/app/pricing" element={<PricingList />} />
           <Route path="/app/pricing/:variantId" element={<Pricing />} />
           <Route path="/app/pricing/:productId/history" element={<PriceHistory />} />
+          <Route path="/app/competitors" element={<Competitors />} />
           <Route element={<RequireModule module="procurement" />}>
             <Route path="/app/procurement" element={<Procurement />} />
             <Route path="/app/procurement/orders" element={<PurchaseOrders />} />

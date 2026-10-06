@@ -17,6 +17,13 @@ export const TIER_RANK: Record<Tier, number> = {
   enterprise: 3,
 };
 
+/** Per-tier AI request limits (monthly, on the platform key). Enterprise brings its own key. */
+export const TIER_AI_LIMITS: Record<Tier, number> = {
+  margin_intelligence: 50,
+  operations_pro: 200,
+  enterprise: 1000, // effectively unlimited; they use their own key
+};
+
 export const isTier = (value: unknown): value is Tier =>
   typeof value === "string" && Object.prototype.hasOwnProperty.call(TIER_RANK, value);
 

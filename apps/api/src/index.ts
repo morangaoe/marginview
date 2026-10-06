@@ -23,6 +23,7 @@ import { scrapingRouter } from "./routes/scraping";
 import { suppliersRouter } from "./routes/suppliers";
 import { integrationsRouter } from "./routes/integrations";
 import { aiRouter } from "./routes/ai";
+import { dashboardRouter } from "./routes/dashboard";
 import { startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
 import { HttpError } from "./utils/http";
 
@@ -73,6 +74,7 @@ app.use("/api/scraper", requireAuth, scraperRouter);
 // if someone later removes the internal middleware.
 app.use("/api/integrations", requireAuth, integrationsRouter);
 app.use("/api/ai", requireAuth, aiRouter);
+app.use("/api/dashboard", requireAuth, dashboardRouter);
 
 // These apply requireAuth inside the router themselves.
 app.use("/api/procurement", requireAuth, requireModule("procurement"), procurementRouter);

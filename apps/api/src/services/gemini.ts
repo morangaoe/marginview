@@ -8,9 +8,11 @@ import Anthropic from "@anthropic-ai/sdk";
 import { query } from "../db/pool";
 import { HttpError } from "../utils/http";
 import { decrypt } from "./crypto";
+import { getOrgTier } from "./billing";
+import { TIER_AI_LIMITS } from "./plans";
 
 const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
-const MONTHLY_LIMIT = Number(process.env.AI_MONTHLY_LIMIT ?? 200);
+const FALLBACK_LIMIT = Number(process.env.AI_MONTHLY_LIMIT ?? 200);
 
 export interface ResolvedKey { apiKey: string; model: string; source: "org" | "platform" }
 
@@ -87,12 +89,19 @@ export async function askAI<T>(
   if (!k) throw new HttpError(503, "AI isn't configured. Add a Claude API key in Settings, or ask your admin.");
 
   if (k.source === "platform") {
+    // Tier-based AI limits: each plan gets a different monthly quota.
+    let limit = FALLBACK_LIMIT;
+    try {
+      const { effectiveTier } = await getOrgTier(orgId);
+      limit = TIER_AI_LIMITS[effectiveTier] ?? FALLBACK_LIMIT;
+    } catch { /* billing lookup failed — fall back to env default */ }
+
     const [{ n }] = await query<{ n: string }>(
       "select count(*)::text as n from ai_usage where organization_id = $1 and source = 'platform' and created_at >= date_trunc('month', now())",
       [orgId],
     );
-    if (Number(n) >= MONTHLY_LIMIT) {
-      throw new HttpError(429, `You've used your ${MONTHLY_LIMIT} included AI requests this month. Add your own Claude key in Settings or upgrade.`);
+    if (Number(n) >= limit) {
+      throw new HttpError(429, `You've used your ${limit} included AI requests this month. Add your own Claude key in Settings or upgrade.`);
     }
   }
   const out = await callClaude<T>(k, opts);

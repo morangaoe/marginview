@@ -280,9 +280,9 @@ create table audit_logs (
 -- unlimited on every tier since collaboration across roles is a stated
 -- product goal, not something to meter.
 insert into plans (name, pricing_model) values
-  ('Starter', '{"tracked_sources_included": 15, "sku_soft_limit": 200, "price_cents_monthly": 4900, "billing": "self_serve"}'),
-  ('Growth', '{"tracked_sources_included": 100, "sku_soft_limit": 2000, "price_cents_monthly": 19900, "billing": "self_serve"}'),
-  ('Scale', '{"tracked_sources_included": null, "sku_soft_limit": null, "price_cents_monthly": null, "starting_floor_cents_monthly": 49900, "billing": "sales_assisted"}');
+  ('Starter', '{"tier": "margin_intelligence", "tracked_sources_included": 15, "sku_soft_limit": 200, "price_cents_monthly": 4900, "billing": "self_serve"}'),
+  ('Growth', '{"tier": "operations_pro", "tracked_sources_included": 100, "sku_soft_limit": 2000, "price_cents_monthly": 19900, "billing": "self_serve"}'),
+  ('Scale', '{"tier": "enterprise", "tracked_sources_included": null, "sku_soft_limit": null, "price_cents_monthly": null, "starting_floor_cents_monthly": 49900, "billing": "sales_assisted"}');
 
 create table notifications (
   id uuid primary key default uuid_generate_v4(),

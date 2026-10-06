@@ -5,6 +5,7 @@ import express from "express";
 import { pool } from "./db/pool";
 import { startScrapeWorker } from "./queues/scrapeQueue";
 import { requireAuth } from "./middleware/auth";
+import { requireModule } from "./middleware/plan";
 import { adminRouter } from "./routes/admin";
 import { assistantRouter } from "./routes/assistant";
 import { authRouter } from "./routes/auth";
@@ -64,11 +65,11 @@ app.use("/api/competitors", requireAuth, competitorsRouter);
 app.use("/api/scraper", requireAuth, scraperRouter);
 
 // These apply requireAuth inside the router themselves.
-app.use("/api/procurement", procurementRouter);
+app.use("/api/procurement", requireAuth, requireModule("procurement"), procurementRouter);
 app.use("/api/assistant", assistantRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/scraping", scrapingRouter);
-app.use("/api/suppliers", suppliersRouter);
+app.use("/api/suppliers", requireAuth, requireModule("procurement"), suppliersRouter);
 app.use("/api/admin", adminRouter);
 
 // Unknown /api routes get JSON instead of Express's default HTML 404.

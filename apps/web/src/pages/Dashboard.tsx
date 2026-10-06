@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { StatusPill } from "../components/StatusPill";
-import { useAuth } from "../auth/AuthContext";
+import { usePlanAccess } from "../plan/PlanContext";
 
 interface InventoryRow {
   id: string;
@@ -52,17 +52,22 @@ function StatCard({ label, value, sub, tone }: { label: string; value: string | 
 }
 
 export function Dashboard() {
-  const { user } = useAuth();
+  const { can, loading: planLoading } = usePlanAccess();
+  const hasInventory = can("inventory");
+  const hasProcurement = can("procurement");
   const [inventory, setInventory] = useState<InventoryRow[] | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[] | null>(null);
   const [sources, setSources] = useState<ScrapingSource[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.get<InventoryRow[]>("/inventory/levels").then(setInventory).catch(() => setError("API unavailable."));
-    api.get<Suggestion[]>("/procurement/suggestions").then(setSuggestions).catch(() => {});
+    if (planLoading) return;
+    if (hasInventory) {
+      api.get<InventoryRow[]>("/inventory/levels").then(setInventory).catch(() => setError("API unavailable."));
+    }
+    if (hasProcurement) api.get<Suggestion[]>("/procurement/suggestions").then(setSuggestions).catch(() => {});
     api.get<ScrapingSource[]>("/scraping/sources").then(setSources).catch(() => {});
-  }, []);
+  }, [hasInventory, hasProcurement, planLoading]);
 
   const outOfStock = inventory?.filter(r => r.status === "out_of_stock") ?? [];
   const lowStock   = inventory?.filter(r => r.status === "low") ?? [];
@@ -83,29 +88,27 @@ export function Dashboard() {
 
       {/* Stat row */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 20 }}>
-        <StatCard
-          label="Products tracked"
-          value={inventory === null ? "—" : products.length}
-          sub="In your catalog"
-        />
-        <StatCard
-          label="Out of stock"
-          value={outOfStock.length}
-          tone={outOfStock.length > 0 ? "crit" : "ok"}
-          sub={outOfStock.length > 0 ? "Needs immediate action" : "All good"}
-        />
-        <StatCard
-          label="Low stock"
-          value={lowStock.length}
-          tone={lowStock.length > 0 ? "warn" : "ok"}
-          sub={lowStock.length > 0 ? "Below reorder point" : "Levels healthy"}
-        />
-        <StatCard
+        {hasInventory && <>
+          <StatCard label="Products tracked" value={inventory === null ? "—" : products.length} sub="In your catalog" />
+          <StatCard
+            label="Out of stock"
+            value={outOfStock.length}
+            tone={outOfStock.length > 0 ? "crit" : "ok"}
+            sub={outOfStock.length > 0 ? "Needs immediate action" : "All good"}
+          />
+          <StatCard
+            label="Low stock"
+            value={lowStock.length}
+            tone={lowStock.length > 0 ? "warn" : "ok"}
+            sub={lowStock.length > 0 ? "Below reorder point" : "Levels healthy"}
+          />
+        </>}
+        {hasProcurement && <StatCard
           label="Reorder suggestions"
           value={suggestions?.length ?? "—"}
           tone={(suggestions?.length ?? 0) > 0 ? "warn" : "ok"}
           sub="Open procurement actions"
-        />
+        />}
         <StatCard
           label="Price spikes"
           value={spikes.length}
@@ -116,7 +119,7 @@ export function Dashboard() {
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
         {/* Recent products */}
-        <div className="card">
+        {hasInventory && <div className="card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <strong style={{ fontSize: 14 }}>Recent products</strong>
             <Link to="/app/inventory" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
@@ -133,10 +136,10 @@ export function Dashboard() {
             </div>
           ))}
           {products.length > 5 && <p style={{ color: "var(--slate)", fontSize: 12 }}>Showing 5 of {products.length} products.</p>}
-        </div>
+        </div>}
 
         {/* Procurement suggestions */}
-        <div className="card">
+        {hasProcurement && <div className="card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <strong style={{ fontSize: 14 }}>Procurement</strong>
             <Link to="/app/procurement" style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}>View all →</Link>
@@ -157,7 +160,7 @@ export function Dashboard() {
               </div>
             </div>
           ))}
-        </div>
+        </div>}
 
         {/* Pricing alerts */}
         <div className="card">

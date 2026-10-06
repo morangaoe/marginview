@@ -15,9 +15,9 @@ const FEATURES = [
 ];
 
 const PLANS = [
-  { name: "Starter", price: "$49", items: ["15 tracked sources", "200 SKU soft limit"], cta: "Get started" },
-  { name: "Growth", price: "$199", items: ["100 tracked sources", "2,000 SKU soft limit"], cta: "Get started", hi: true },
-  { name: "Scale", price: "Custom", items: ["Unlimited sources", "Unlimited SKUs"], cta: "Contact sales" },
+  { name: "Margin Intelligence", price: "$49", items: ["15 tracked sources", "Blended pricing strategies", "Competitor spike alerts"], cta: "Get started" },
+  { name: "Operations Pro", price: "$199", items: ["100 tracked sources", "Inventory and CSV import", "Procurement and purchase orders"], cta: "Get started", hi: true },
+  { name: "Enterprise", price: "Custom", items: ["Unlimited sources and SKUs", "Custom ERP connectors", "Dedicated SLA"], cta: "Contact sales" },
 ];
 
 type Row = { sku: string; yours: number; a: number; b: number; delta: number; flash?: boolean };

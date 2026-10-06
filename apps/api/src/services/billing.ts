@@ -1,12 +1,30 @@
 import { pool, query } from "../db/pool";
+import { effectiveTierFor, isTier, type Tier } from "./plans";
 
 export interface PlanUsage {
   planName: string;
+  tier: Tier;
+  effectiveTier: Tier;
   trackedSourcesUsed: number;
   trackedSourcesIncluded: number | null; // null means custom/unmetered (Scale)
   nudge: { level: "none" | "approaching" | "over"; message: string } | null;
   trialActivatedAt: string | null;
   status: string;
+}
+
+export async function getOrgTier(organizationId: string): Promise<{ tier: Tier; effectiveTier: Tier; status: string }> {
+  const [row] = await query<{ tier: string | null; status: string }>(
+    `select p.pricing_model->>'tier' as tier, s.status
+       from subscriptions s join plans p on p.id = s.plan_id
+      where s.organization_id = $1
+      order by s.current_period_end desc nulls last
+      limit 1`,
+    [organizationId],
+  );
+  const tier: Tier = isTier(row?.tier) ? row.tier : "operations_pro";
+  const status = row?.status ?? "trialing";
+  const effectiveTier = effectiveTierFor(tier, status);
+  return { tier, effectiveTier, status };
 }
 
 /**
@@ -41,6 +59,7 @@ export async function getPlanUsage(organizationId: string): Promise<PlanUsage> {
     [organizationId]
   );
   const used = parseInt(count, 10);
+  const tierState = await getOrgTier(organizationId);
 
   let nudge: PlanUsage["nudge"] = null;
   if (included !== null) {
@@ -59,6 +78,8 @@ export async function getPlanUsage(organizationId: string): Promise<PlanUsage> {
 
   return {
     planName,
+    tier: tierState.tier,
+    effectiveTier: tierState.effectiveTier,
     trackedSourcesUsed: used,
     trackedSourcesIncluded: included,
     nudge,

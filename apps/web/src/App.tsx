@@ -25,6 +25,7 @@ import CompetitorSources from "./pages/CompetitorSources";
 import Notifications from "./pages/Notifications";
 import Onboarding from "./pages/Onboarding";
 import Contact from "./pages/Contact";
+import { RequireModule } from "./plan/RequireModule";
 
 export function App() {
   return (
@@ -44,14 +45,18 @@ export function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/app" element={<Dashboard />} />
-          <Route path="/app/inventory" element={<Inventory />} />
-          <Route path="/app/inventory/:skuId" element={<SkuDetail />} />
+          <Route element={<RequireModule module="inventory" />}>
+            <Route path="/app/inventory" element={<Inventory />} />
+            <Route path="/app/inventory/:skuId" element={<SkuDetail />} />
+          </Route>
           <Route path="/app/pricing" element={<PricingList />} />
           <Route path="/app/pricing/:variantId" element={<Pricing />} />
           <Route path="/app/pricing/:productId/history" element={<PriceHistory />} />
-          <Route path="/app/procurement" element={<Procurement />} />
-          <Route path="/app/procurement/orders" element={<PurchaseOrders />} />
-          <Route path="/app/procurement/suppliers" element={<Suppliers />} />
+          <Route element={<RequireModule module="procurement" />}>
+            <Route path="/app/procurement" element={<Procurement />} />
+            <Route path="/app/procurement/orders" element={<PurchaseOrders />} />
+            <Route path="/app/procurement/suppliers" element={<Suppliers />} />
+          </Route>
           <Route path="/app/reports" element={<Reports />} />
           <Route path="/app/notifications" element={<Notifications />} />
           <Route path="/app/onboarding" element={<Onboarding />} />

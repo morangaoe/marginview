@@ -1,6 +1,8 @@
 import { CSSProperties, FormEvent, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { usePlanAccess } from "../plan/PlanContext";
+import DataConnectors from "../components/settings/DataConnectors";
 
 interface OrgInfo {
   id: string;
@@ -36,7 +38,7 @@ interface ScrapingSource {
   validation_flag: string | null;
 }
 
-type Tab = "org" | "locations" | "suppliers" | "scraping";
+type Tab = "org" | "locations" | "suppliers" | "scraping" | "connectors";
 
 function money(cents: number, currency = "USD") {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
@@ -44,6 +46,7 @@ function money(cents: number, currency = "USD") {
 
 export function Settings() {
   const { user } = useAuth();
+  const { can, effectiveTier } = usePlanAccess();
   const [tab, setTab] = useState<Tab>("org");
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [locations, setLocations] = useState<Location[]>([]);
@@ -66,6 +69,7 @@ export function Settings() {
   const [newSupLead, setNewSupLead] = useState("14");
 
   const isOwner = user?.role === "owner";
+  const showConnectors = effectiveTier === "margin_intelligence" || can("integrations");
 
   function flash(msg: string) {
     setSuccess(msg);
@@ -143,8 +147,9 @@ export function Settings() {
   const TABS: { key: Tab; label: string }[] = [
     { key: "org", label: "Organization" },
     { key: "locations", label: "Locations" },
-    { key: "suppliers", label: "Suppliers" },
+    ...(can("procurement") ? [{ key: "suppliers" as Tab, label: "Suppliers" }] : []),
     { key: "scraping", label: "Tracked competitors" },
+    ...(showConnectors ? [{ key: "connectors" as Tab, label: can("integrations") ? "Integrations" : "Data connectors" }] : []),
   ];
 
   return (
@@ -253,7 +258,7 @@ export function Settings() {
       )}
 
       {/* Suppliers tab */}
-      {tab === "suppliers" && (
+      {tab === "suppliers" && can("procurement") && (
         <div>
           <div className="card" style={{ marginBottom: 16 }}>
             <strong style={{ display: "block", marginBottom: 12 }}>Suppliers</strong>
@@ -367,6 +372,7 @@ export function Settings() {
           )}
         </div>
       )}
+      {tab === "connectors" && showConnectors && <DataConnectors enterprise={can("integrations")} />}
     </div>
   );
 }

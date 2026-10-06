@@ -147,12 +147,15 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
     const competitorPricesCents: number[] = comp.rows.map((r: any) => Number(r.price_cents));
 
     const inv = await pool.query(
-      `SELECT COALESCE(SUM(on_hand), 0)::int AS stock, COALESCE(SUM(max_capacity), 0)::int AS cap
+      `SELECT COALESCE(SUM(on_hand), 0)::int AS stock,
+              COALESCE(SUM(max_capacity), 0)::int AS cap,
+              COALESCE(BOOL_OR(max_capacity <> 100), false) AS has_custom_capacity
          FROM inventory_levels WHERE product_variant_id = $1`,
       [req.params.variantId],
     );
     const cap = Number(inv.rows[0]?.cap ?? 0);
-    const stockPct = cap > 0 ? (Number(inv.rows[0].stock) / cap) * 100 : null;
+    const hasCustomCapacity = inv.rows[0]?.has_custom_capacity === true;
+    const stockPct = cap > 0 && hasCustomCapacity ? (Number(inv.rows[0].stock) / cap) * 100 : null;
     const { weights: effective, notes } = adaptWeights(
       w,
       { trusted: competitorPricesCents.length, stockPct },

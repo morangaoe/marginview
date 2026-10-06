@@ -18,6 +18,10 @@ describe("computeStrategy", () => {
     expect(median([])).toBeNull();
   });
 
+  it("keeps an outlier from shifting the market median materially", () => {
+    expect(median([1000, 1050, 100000])).toBe(1050);
+  });
+
   it("removes dynamic weight when no trusted competitors exist", () => {
     const result = adaptWeights({ cost_plus: 10, value_based: 20, keystone: 30, dynamic: 40 }, { trusted: 0, stockPct: null });
     expect(result.weights.dynamic).toBe(0);
@@ -31,6 +35,16 @@ describe("computeStrategy", () => {
     const overstock = adaptWeights({ cost_plus: 10, value_based: 20, keystone: 30, dynamic: 40 }, { trusted: 3, stockPct: 90 });
     expect(overstock.notes[0]).toMatch(/90% of capacity/i);
     expect(overstock.weights.dynamic).toBeGreaterThan(40);
+  });
+
+  it("uses plain normalized slider shares when adaptive weights are disabled", () => {
+    const result = adaptWeights(
+      { cost_plus: 10, value_based: 20, keystone: 30, dynamic: 40 },
+      { trusted: 0, stockPct: 99 },
+      false,
+    );
+    expect(result.weights).toEqual({ cost_plus: 10, value_based: 20, keystone: 30, dynamic: 40 });
+    expect(result.notes).toEqual([]);
   });
 
   it("keystone doubles unit cost regardless of competitors", () => {

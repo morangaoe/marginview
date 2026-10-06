@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.1.0",
     "cheerio": "^1.2.0",

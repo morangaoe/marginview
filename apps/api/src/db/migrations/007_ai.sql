@@ -2,7 +2,7 @@ begin;
 create table if not exists org_integrations (
   id uuid primary key default uuid_generate_v4(),
   organization_id uuid not null references organizations(id),
-  provider text not null check (provider in ('gemini')),
+  provider text not null check (provider in ('claude')),
   key_ciphertext text not null,
   key_last4 text not null,
   model text,

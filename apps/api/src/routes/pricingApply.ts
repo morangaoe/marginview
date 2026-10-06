@@ -6,6 +6,7 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
 import { requireRole } from "../middleware/auth";
+import { marginFor } from "../services/pricingStrategies";
 
 const router = Router();
 const canChangePrice = requireRole("owner", "pricing_manager");
@@ -23,14 +24,13 @@ router.post("/:variantId/apply", canChangePrice, async (req: Request, res: Respo
     return res.status(400).json({ error: "price_cents must be a positive whole number of cents" });
   }
   const strategy = typeof req.body?.strategy === "string" ? req.body.strategy.slice(0, 40) : "optimized";
-  const marginAfter = typeof req.body?.margin_after_pct === "number" ? req.body.margin_after_pct : null;
   const variantId = req.params.variantId;
 
   const client = await pool.connect();
   try {
     await client.query("begin");
     const cur = await client.query(
-      `select v.current_price_cents from product_variants v
+      `select v.unit_cost_cents, v.current_price_cents from product_variants v
          join products p on p.id = v.product_id
         where v.id = $1 and p.organization_id = $2 and v.deleted_at is null
         for update of v`,
@@ -40,7 +40,17 @@ router.post("/:variantId/apply", canChangePrice, async (req: Request, res: Respo
       await client.query("rollback");
       return res.status(404).json({ error: "Variant not found" });
     }
+    const costCents = Number(cur.rows[0].unit_cost_cents);
     const oldCents: number | null = cur.rows[0].current_price_cents;
+    if (newCents <= costCents && req.body?.allow_below_cost !== true) {
+      await client.query("rollback");
+      return res.status(409).json({ error: "This price is at or below cost. Confirm to apply it anyway." });
+    }
+    if (oldCents === newCents) {
+      await client.query("rollback");
+      return res.status(409).json({ error: "That is already the current price." });
+    }
+    const marginAfter = marginFor(newCents, costCents);
 
     await client.query(
       "update product_variants set current_price_cents = $2, updated_at = now() where id = $1",

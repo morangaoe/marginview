@@ -3,17 +3,19 @@ import { useApi } from "../lib/useApi";
 import StateView from "../components/StateView";
 import "../styles/extra-pages.css";
 
-type Change = { id: string; at: string; actor: string; from: number; to: number; strategy: string; marginAfter: number | null };
+type Change = { id: string; at: string; actor: string; from: number | null; to: number; strategy: string; marginAfter: number | null };
 type History = { productName: string; currency: string; changes: Change[] };
 
 export default function PriceHistory() {
   const { productId } = useParams();
   const { data, error, loading, reload } = useApi<History>(productId ? `/pricing/${productId}/history` : null);
-  const money = (n: number, c: string) => new Intl.NumberFormat(undefined, { style: "currency", currency: c }).format(n);
+  const money = (cents: number | null, currency: string) => cents === null
+    ? "—"
+    : new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
 
   return (
     <div className="mv-page">
-      <p><Link to="/pricing">Back to pricing</Link></p>
+      <p><Link to={productId ? `/app/pricing/${productId}` : "/app/pricing"}>Back to pricing</Link></p>
       <h1>Price change history{data ? `: ${data.productName}` : ""}</h1>
       <p className="mv-sub">Every applied price, who applied it and which strategy produced it.</p>
       <StateView loading={loading} error={error} onRetry={reload} isEmpty={!data || data.changes.length === 0}

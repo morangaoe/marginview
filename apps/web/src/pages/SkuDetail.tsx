@@ -13,13 +13,13 @@ export default function SkuDetail() {
 
   return (
     <div className="mv-page">
-      <p><Link to="/inventory">Back to inventory</Link></p>
+      <p><Link to="/app/inventory">Back to inventory</Link></p>
       <StateView loading={loading} error={error} onRetry={reload} isEmpty={!data}
         emptyTitle="SKU not found" emptyHint="It may have been removed. Go back to the inventory list.">
         {data && (
           <>
             <h1>{data.name}</h1>
-            <p className="mv-sub">SKU {data.sku} · <Link to={`/pricing/${data.id}/history`}>View price history</Link></p>
+            <p className="mv-sub">SKU {data.sku} · <Link to={`/app/pricing/${data.id}/history`}>View price history</Link></p>
 
             <h2>Stock by location</h2>
             <div className="mv-table-wrap">

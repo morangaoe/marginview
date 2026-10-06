@@ -8,6 +8,10 @@ import {
   type PricingWeights,
 } from "../types/inventory";
 import { dollarsToCents } from "../utils/csvParser";
+import { useAuth } from "../auth/AuthContext";
+import { useMv } from "../lib/mv";
+import { ApplyPriceBar } from "./ApplyPriceBar";
+import { CompetitorContext, type PricingContext } from "./CompetitorContext";
 
 interface Props {
   variantId: string;
@@ -44,16 +48,17 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
   const [result, setResult] = useState<OptimizedPricingResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [confirming, setConfirming] = useState(false);
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const seq = useRef(0);
+  const { user } = useAuth();
+  const canApply = user?.role === "owner" || user?.role === "pricing_manager";
+  const ctx = useMv<PricingContext>(`/api/pricing/${variantId}/context`);
 
   // Reset the editable price points when a different variant is selected.
   useEffect(() => {
     setValueBased(((costCents * 2.6) / 100).toFixed(2));
     setDynamic(((costCents * 2.2) / 100).toFixed(2));
-    setConfirming(false);
     setNotice(null);
   }, [variantId, costCents]);
 
@@ -87,11 +92,14 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
 
   const total = weights.cost_plus + weights.value_based + weights.keystone + weights.dynamic;
   const balanced = Math.abs(total - 100) < 0.01;
+  const markupNum = Number(markup);
+  const targetMargin = Number.isFinite(markupNum) && markupNum >= 0 ? (markupNum / (100 + markupNum)) * 100 : 0;
 
   const newPrice = result?.optimized_price_cents ?? null;
-  const marginBefore = currentPriceCents ? marginOf(currentPriceCents, costCents) : null;
+  const effectiveCurrentPrice = ctx.data?.currentPriceCents ?? currentPriceCents;
+  const marginBefore = effectiveCurrentPrice ? marginOf(effectiveCurrentPrice, costCents) : null;
   const marginAfter = newPrice ? marginOf(newPrice, costCents) : null;
-  const changePct = currentPriceCents && newPrice ? ((newPrice - currentPriceCents) / currentPriceCents) * 100 : null;
+  const changePct = effectiveCurrentPrice && newPrice ? ((newPrice - effectiveCurrentPrice) / effectiveCurrentPrice) * 100 : null;
 
   // Engine warnings, shown instead of dropped.
   const warnings = result
@@ -100,31 +108,13 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
         .filter((w) => w.text)
     : [];
 
-  async function apply() {
-    if (!result || newPrice === null) return;
-    setWorking(true);
-    setNotice(null);
-    try {
-      await apiJson(`/api/pricing/${variantId}/apply`, {
-        method: "POST",
-        body: JSON.stringify({ price_cents: newPrice, margin_after_pct: result.margin_percent, strategy: "optimized" }),
-      });
-      setConfirming(false);
-      setNotice("Price applied. You can undo this change below.");
-      onChanged?.();
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : "Could not apply the price.");
-    } finally {
-      setWorking(false);
-    }
-  }
-
   async function undo() {
     setWorking(true);
     setNotice(null);
     try {
       const r = await apiJson<{ restored_price_cents: number }>(`/api/pricing/${variantId}/undo`, { method: "POST" });
       setNotice(`Restored the previous price (${formatCents(r.restored_price_cents)}).`);
+      ctx.reload();
       onChanged?.();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not undo the change.");
@@ -151,16 +141,6 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
     padding: "8px 16px",
     cursor: "pointer",
   };
-  const primary: React.CSSProperties = {
-    background: ACCENT,
-    color: "var(--mv-accent-text, #06130d)",
-    border: "none",
-    borderRadius: 6,
-    padding: "8px 16px",
-    fontWeight: 600,
-    cursor: "pointer",
-  };
-
   return (
     <section style={{ display: "grid", gap: 20 }}>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -208,7 +188,7 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
         <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
           <div>
             <div style={small}>Current price</div>
-            <div style={stat}>{currentPriceCents ? formatCents(currentPriceCents) : "Not set"}</div>
+            <div style={stat}>{effectiveCurrentPrice !== null ? formatCents(effectiveCurrentPrice) : "Not set"}</div>
           </div>
           <div>
             <div style={small}>Optimized price</div>
@@ -240,34 +220,26 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
           </div>
         </div>
 
-        {/* Two-step apply so one click can't change a live price */}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {!confirming ? (
-            <button
-              type="button"
-              onClick={() => setConfirming(true)}
-              disabled={!result || newPrice === null || working || loading}
-              style={primary}
-            >
-              Apply {newPrice !== null ? formatCents(newPrice) : "price"}
-            </button>
-          ) : (
-            <>
-              <span style={small}>Set this variant's price to {formatCents(newPrice ?? 0)}?</span>
-              <button type="button" onClick={apply} disabled={working} style={primary}>
-                {working ? "Applying…" : "Confirm"}
-              </button>
-              <button type="button" onClick={() => setConfirming(false)} disabled={working} style={btn}>
-                Cancel
-              </button>
-            </>
-          )}
           <button type="button" onClick={undo} disabled={working} style={btn}>
             Undo last change
           </button>
         </div>
         {notice && <div role="status" style={small}>{notice}</div>}
       </div>
+
+      {ctx.error && <div role="alert" style={{ color: DANGER, fontSize: 13 }}>{ctx.error}</div>}
+      {ctx.data && <CompetitorContext data={ctx.data} yourPriceCents={newPrice ?? ctx.data.currentPriceCents} />}
+      <ApplyPriceBar
+        variantId={variantId}
+        costCents={costCents}
+        currentPriceCents={ctx.data?.currentPriceCents ?? currentPriceCents}
+        newPriceCents={newPrice}
+        targetMarginPct={targetMargin}
+        canApply={canApply}
+        disabled={loading || !!error || !result}
+        onApplied={() => { ctx.reload(); onChanged?.(); }}
+      />
 
       {warnings.length > 0 && (
         <div role="note" style={{ border: `1px solid ${WARN}`, borderRadius: 8, padding: 12, display: "grid", gap: 6, fontSize: 13 }}>

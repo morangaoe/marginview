@@ -34,6 +34,57 @@ const COMPETITOR_SQL = `
    ORDER BY cp.id, ps.observed_at DESC
 `;
 
+/** GET /api/pricing/:variantId/context */
+router.get("/:variantId/context", async (req: Request, res: Response) => {
+  let orgId: string;
+  try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+
+  try {
+    const variant = await pool.query(VARIANT_SQL, [req.params.variantId, orgId]);
+    if (!variant.rows.length) return res.status(404).json({ error: "Variant not found" });
+
+    const { rows } = await pool.query(
+      `SELECT cp.id, cp.competitor_name AS "competitorName", ss.url,
+              snap.price_cents AS "priceCents", snap.currency,
+              snap.observed_at AS "observedAt", snap.validation_flag AS flag
+         FROM competitor_products cp
+         JOIN scraping_sources ss ON ss.id = cp.scraping_source_id
+         LEFT JOIN LATERAL (
+           SELECT price_cents, currency, observed_at, validation_flag
+             FROM price_snapshots
+            WHERE competitor_product_id = cp.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) snap ON true
+        WHERE cp.product_variant_id = $1 AND ss.organization_id = $2
+        ORDER BY cp.competitor_name`,
+      [req.params.variantId, orgId],
+    );
+    const competitors = rows.map((row: any) => ({
+      ...row,
+      priceCents: row.priceCents === null ? null : Number(row.priceCents),
+    }));
+    const trusted = competitors
+      .filter((competitor: any) => competitor.priceCents !== null && (competitor.flag === null || competitor.flag === "ok"))
+      .map((competitor: any) => competitor.priceCents as number);
+
+    return res.json({
+      variantId: variant.rows[0].id,
+      costCents: Number(variant.rows[0].cost_cents),
+      currentPriceCents: variant.rows[0].current_price_cents === null ? null : Number(variant.rows[0].current_price_cents),
+      competitors,
+      stats: trusted.length ? {
+        avgCents: Math.round(trusted.reduce((sum: number, cents: number) => sum + cents, 0) / trusted.length),
+        minCents: Math.min(...trusted),
+        maxCents: Math.max(...trusted),
+        count: trusted.length,
+      } : null,
+    });
+  } catch (err) {
+    console.error("GET /pricing/:variantId/context failed", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 /**
  * POST /api/pricing/:variantId/optimized
  *
@@ -147,10 +198,7 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/pricing/:variantId/history
- * Returns the last 90 days of price changes for a variant.
- */
+/** GET /api/pricing/:variantId/history: last 90 days from price_change_log. */
 router.get("/:variantId/history", async (req: Request, res: Response) => {
   let orgId: string;
   try {
@@ -161,22 +209,23 @@ router.get("/:variantId/history", async (req: Request, res: Response) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT pch.id,
-              pch.changed_at       AS at,
-              pch.actor,
-              pch.old_price_cents  AS "from",
-              pch.new_price_cents  AS "to",
-              pch.strategy,
-              pch.margin_after     AS "marginAfter",
-              p.name               AS "productName",
-              p.default_currency   AS currency
-         FROM price_change_history pch
-         JOIN product_variants v  ON v.id = pch.product_variant_id
-         JOIN products p          ON p.id = v.product_id
-        WHERE pch.product_variant_id = $1
+      `SELECT pcl.id,
+              pcl.applied_at AS at,
+              COALESCE(u.full_name, 'Unknown') AS actor,
+              pcl.old_price_cents AS "from",
+              pcl.new_price_cents AS "to",
+              COALESCE(pcl.strategy, 'manual') AS strategy,
+              pcl.margin_after_pct AS "marginAfter",
+              p.name AS "productName",
+              v.currency
+         FROM price_change_log pcl
+         JOIN product_variants v ON v.id = pcl.product_variant_id
+         JOIN products p ON p.id = v.product_id
+         LEFT JOIN users u ON u.id = pcl.actor_user_id
+        WHERE pcl.product_variant_id = $1
           AND p.organization_id = $2
-          AND pch.changed_at >= now() - interval '90 days'
-        ORDER BY pch.changed_at DESC
+          AND pcl.applied_at >= now() - interval '90 days'
+        ORDER BY pcl.applied_at DESC
         LIMIT 200`,
       [req.params.variantId, orgId],
     );
@@ -190,7 +239,7 @@ router.get("/:variantId/history", async (req: Request, res: Response) => {
         id: r.id,
         at: r.at,
         actor: r.actor,
-        from: Number(r.from),
+        from: r.from === null ? null : Number(r.from),
         to: Number(r.to),
         strategy: r.strategy,
         marginAfter: r.marginAfter !== null ? Number(r.marginAfter) : null,

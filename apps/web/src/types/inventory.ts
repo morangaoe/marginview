@@ -133,8 +133,18 @@ export interface OptimizedPricingResponse {
   cost_cents: number;
   weights_input: PricingWeights;
   weights_normalized: PricingWeights;
+  weights_effective: PricingWeights;
   weights_balanced: boolean;
+  adjustments: string[];
+  trusted_competitors: number;
+  stock_pct: number | null;
   baselines: Record<keyof PricingWeights, { price_cents: number; margin_percent: number; warning?: string | null }>;
+  breakdown: {
+    strategy: keyof PricingWeights;
+    weight_pct: number;
+    price_cents: number;
+    contribution_cents: number;
+  }[];
   optimized_price_cents: number;
   margin_percent: number;
 }

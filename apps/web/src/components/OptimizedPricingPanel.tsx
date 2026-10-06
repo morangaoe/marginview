@@ -12,6 +12,7 @@ import { useAuth } from "../auth/AuthContext";
 import { useMv } from "../lib/mv";
 import { ApplyPriceBar } from "./ApplyPriceBar";
 import { CompetitorContext, type PricingContext } from "./CompetitorContext";
+import { PriceBreakdown } from "./PriceBreakdown";
 
 interface Props {
   variantId: string;
@@ -44,7 +45,9 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
   const [weights, setWeights] = useState<PricingWeights>(DEFAULT_PRICING_WEIGHTS);
   const [markup, setMarkup] = useState(String(DEFAULT_MARKUP_PERCENT));
   const [valueBased, setValueBased] = useState(((costCents * 2.6) / 100).toFixed(2));
-  const [dynamic, setDynamic] = useState(((costCents * 2.2) / 100).toFixed(2));
+  const [position, setPosition] = useState("0");
+  const [minMargin, setMinMargin] = useState("10");
+  const [adaptive, setAdaptive] = useState(true);
   const [result, setResult] = useState<OptimizedPricingResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -58,17 +61,21 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
   // Reset the editable price points when a different variant is selected.
   useEffect(() => {
     setValueBased(((costCents * 2.6) / 100).toFixed(2));
-    setDynamic(((costCents * 2.2) / 100).toFixed(2));
     setNotice(null);
   }, [variantId, costCents]);
 
   // Debounced so dragging a slider doesn't send a request per pixel.
   useEffect(() => {
     const vb = dollarsToCents(valueBased);
-    const dyn = dollarsToCents(dynamic);
     const markupNum = Number(markup);
-    if (vb === null || dyn === null || !Number.isFinite(markupNum) || markupNum < 0) {
-      setError("Enter valid prices and a markup of 0 or more.");
+    const positionNum = Number(position);
+    const minMarginNum = Number(minMargin);
+    if (
+      vb === null || !Number.isFinite(markupNum) || markupNum < 0 ||
+      !Number.isFinite(positionNum) || positionNum < -50 || positionNum > 50 ||
+      !Number.isFinite(minMarginNum) || minMarginNum < 0 || minMarginNum > 95
+    ) {
+      setError("Check inputs: markup 0 or more, market position -50 to 50, minimum margin 0 to 95.");
       return;
     }
     setError(null);
@@ -78,7 +85,14 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
       try {
         const res = await apiJson<OptimizedPricingResponse>(`/api/pricing/${variantId}/optimized`, {
           method: "POST",
-          body: JSON.stringify({ weights, markup_percent: markupNum, value_based_cents: vb, dynamic_cents: dyn }),
+          body: JSON.stringify({
+            weights,
+            markup_percent: markupNum,
+            value_based_cents: vb,
+            dynamic_position_pct: positionNum,
+            min_margin_pct: minMarginNum,
+            adaptive,
+          }),
         });
         if (id === seq.current) setResult(res);
       } catch (e) {
@@ -88,10 +102,8 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [variantId, weights, markup, valueBased, dynamic]);
+  }, [variantId, weights, markup, valueBased, position, minMargin, adaptive]);
 
-  const total = weights.cost_plus + weights.value_based + weights.keystone + weights.dynamic;
-  const balanced = Math.abs(total - 100) < 0.01;
   const markupNum = Number(markup);
   const targetMargin = Number.isFinite(markupNum) && markupNum >= 0 ? (markupNum / (100 + markupNum)) * 100 : 0;
 
@@ -153,14 +165,22 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
           <input style={field} inputMode="decimal" value={valueBased} onChange={(e) => setValueBased(e.target.value)} />
         </label>
         <label style={{ fontSize: 13, color: MUTED }}>
-          Dynamic price ($)<br />
-          <input style={field} inputMode="decimal" value={dynamic} onChange={(e) => setDynamic(e.target.value)} />
+          Market position %<br />
+          <input style={field} inputMode="decimal" value={position} onChange={(e) => setPosition(e.target.value)} title="Relative to the competitor median. Negative undercuts." />
+        </label>
+        <label style={{ fontSize: 13, color: MUTED }}>
+          Min margin % (dynamic)<br />
+          <input style={field} inputMode="decimal" value={minMargin} onChange={(e) => setMinMargin(e.target.value)} />
+        </label>
+        <label style={{ fontSize: 13, color: MUTED, alignSelf: "end", display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={adaptive} onChange={(e) => setAdaptive(e.target.checked)} />
+          Adapt weights to data
         </label>
       </div>
 
       <div style={{ display: "grid", gap: 12 }}>
         {(Object.keys(LABELS) as Keys[]).map((key) => (
-          <div key={key} style={{ display: "grid", gridTemplateColumns: "110px 1fr 56px 90px", alignItems: "center", gap: 12 }}>
+          <div key={key} style={{ display: "grid", gridTemplateColumns: "110px 1fr 96px 90px", alignItems: "center", gap: 12 }}>
             <label htmlFor={`w-${key}`} style={{ fontSize: 14 }}>{LABELS[key]}</label>
             <input
               id={`w-${key}`}
@@ -172,14 +192,17 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
               onChange={(e) => setWeights((w) => ({ ...w, [key]: Number(e.target.value) }))}
               style={{ accentColor: "#3fae7a" }}
             />
-            <span style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{weights[key]}%</span>
+            <span style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+              {weights[key]}
+              {result && <b style={{ color: ACCENT }}> → {result.weights_effective[key].toFixed(0)}%</b>}
+            </span>
             <span style={{ textAlign: "right", color: MUTED, fontVariantNumeric: "tabular-nums" }}>
               {result ? formatCents((result.baselines[key] as Baseline).price_cents) : "—"}
             </span>
           </div>
         ))}
-        <div style={{ fontSize: 13, color: balanced ? ACCENT : WARN }}>
-          Weights total {total}%{balanced ? "" : ". Not 100%, so they are scaled proportionally when blending."}
+        <div style={{ fontSize: 13, color: MUTED }}>
+          Sliders are relative. The green figure is each strategy's real share of the final price.
         </div>
       </div>
 
@@ -228,6 +251,7 @@ export function OptimizedPricingPanel({ variantId, costCents, currentPriceCents 
         {notice && <div role="status" style={small}>{notice}</div>}
       </div>
 
+      {result && <PriceBreakdown result={result} />}
       {ctx.error && <div role="alert" style={{ color: DANGER, fontSize: 13 }}>{ctx.error}</div>}
       {ctx.data && <CompetitorContext data={ctx.data} yourPriceCents={newPrice ?? ctx.data.currentPriceCents} />}
       <ApplyPriceBar

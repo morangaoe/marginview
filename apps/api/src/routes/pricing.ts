@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
-import { computeStrategy, marginFor } from "../services/pricingStrategies";
+import { adaptWeights, computeStrategy, marginFor, median, type Weights } from "../services/pricingStrategies";
 import { orgIdOf } from "../utils/http";
 
 const router = Router();
@@ -73,7 +73,7 @@ router.get("/:variantId/context", async (req: Request, res: Response) => {
       currentPriceCents: variant.rows[0].current_price_cents === null ? null : Number(variant.rows[0].current_price_cents),
       competitors,
       stats: trusted.length ? {
-        avgCents: Math.round(trusted.reduce((sum: number, cents: number) => sum + cents, 0) / trusted.length),
+        medianCents: Math.round(median(trusted)!),
         minCents: Math.min(...trusted),
         maxCents: Math.max(...trusted),
         count: trusted.length,
@@ -101,38 +101,37 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { weights, target_margin_pct, markup_percent, value_based_cents, dynamic_cents } =
-    req.body ?? {};
+  const {
+    weights, target_margin_pct, markup_percent, value_based_cents,
+    dynamic_cents, dynamic_position_pct, min_margin_pct, adaptive,
+  } = req.body ?? {};
 
-  if (!weights || typeof weights !== "object") {
-    return res.status(400).json({ error: "weights is required" });
-  }
+  if (!weights || typeof weights !== "object") return res.status(400).json({ error: "weights is required" });
 
-  const w: Record<Strategy, number> = { cost_plus: 0, value_based: 0, keystone: 0, dynamic: 0 };
+  const w: Weights = { cost_plus: 0, value_based: 0, keystone: 0, dynamic: 0 };
   for (const name of STRATEGIES) {
     const val = weights[name];
-    if (!isNum(val) || val < 0) {
-      return res.status(400).json({ error: `weights.${name} must be a non-negative number` });
-    }
+    if (!isNum(val) || val < 0) return res.status(400).json({ error: `weights.${name} must be a non-negative number` });
     w[name] = val;
   }
 
-  const optionalNumbers: [string, unknown][] = [
-    ["target_margin_pct", target_margin_pct],
-    ["markup_percent", markup_percent],
-    ["value_based_cents", value_based_cents],
-    ["dynamic_cents", dynamic_cents],
-  ];
-  for (const [label, val] of optionalNumbers) {
-    if (val !== undefined && (!isNum(val) || val < 0)) {
-      return res.status(400).json({ error: `${label} must be a non-negative number` });
-    }
+  for (const [label, val] of [
+    ["target_margin_pct", target_margin_pct], ["markup_percent", markup_percent],
+    ["value_based_cents", value_based_cents], ["dynamic_cents", dynamic_cents],
+  ] as [string, unknown][]) {
+    if (val !== undefined && (!isNum(val) || val < 0)) return res.status(400).json({ error: `${label} must be a non-negative number` });
+  }
+  if (dynamic_position_pct !== undefined && (!isNum(dynamic_position_pct) || dynamic_position_pct < -50 || dynamic_position_pct > 50)) {
+    return res.status(400).json({ error: "dynamic_position_pct must be between -50 and 50" });
+  }
+  if (min_margin_pct !== undefined && (!isNum(min_margin_pct) || min_margin_pct < 0 || min_margin_pct > 95)) {
+    return res.status(400).json({ error: "min_margin_pct must be between 0 and 95" });
   }
 
-  // A markup of m% on cost equals a margin of m / (100 + m) on price.
+  // Convert markup on cost to its equivalent gross margin on selling price.
   const targetMarginPct: number =
-    target_margin_pct ??
-    (markup_percent !== undefined ? (markup_percent / (100 + markup_percent)) * 100 : 40);
+    target_margin_pct ?? (markup_percent !== undefined ? (markup_percent / (100 + markup_percent)) * 100 : 40);
+  if (targetMarginPct > 95) return res.status(400).json({ error: "target_margin_pct must not exceed 95" });
 
   try {
     const variant = await pool.query(VARIANT_SQL, [req.params.variantId, orgId]);
@@ -147,30 +146,36 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
     const comp = await pool.query(COMPETITOR_SQL, [req.params.variantId]);
     const competitorPricesCents: number[] = comp.rows.map((r: any) => Number(r.price_cents));
 
+    const inv = await pool.query(
+      `SELECT COALESCE(SUM(on_hand), 0)::int AS stock, COALESCE(SUM(max_capacity), 0)::int AS cap
+         FROM inventory_levels WHERE product_variant_id = $1`,
+      [req.params.variantId],
+    );
+    const cap = Number(inv.rows[0]?.cap ?? 0);
+    const stockPct = cap > 0 ? (Number(inv.rows[0].stock) / cap) * 100 : null;
+    const { weights: effective, notes } = adaptWeights(
+      w,
+      { trusted: competitorPricesCents.length, stockPct },
+      adaptive !== false,
+    );
+
     const base = { unitCostCents: costCents, competitorPricesCents, currentPriceCents };
 
     const parametersFor: Record<Strategy, Record<string, number>> = {
       cost_plus: { targetMarginPct },
       value_based: { perceivedValueCents: value_based_cents ?? Math.round(costCents * 2.6) },
       keystone: {},
-      dynamic:
-        dynamic_cents !== undefined
+      dynamic: {
+        positionPct: dynamic_position_pct ?? 0,
+        minMarginPct: min_margin_pct ?? 10,
+        ...(dynamic_cents !== undefined
           ? { floorCents: Math.round(dynamic_cents), ceilingCents: Math.round(dynamic_cents) }
-          : {},
+          : {}),
+      },
     };
-
-    const total = STRATEGIES.reduce((sum, n) => sum + w[n], 0);
-    const normalized: Record<Strategy, number> = {
-      cost_plus: 0,
-      value_based: 0,
-      keystone: 0,
-      dynamic: 0,
-    };
-    for (const n of STRATEGIES) normalized[n] = total > 0 ? (w[n] / total) * 100 : 25;
 
     const baselines = {} as Record<Strategy, Baseline>;
-    let blended = 0;
-    for (const n of STRATEGIES) {
+    const breakdown = STRATEGIES.map((n) => {
       const r = computeStrategy(n, { ...base, parameters: parametersFor[n] });
       const price = r.recommendedPriceCents;
       baselines[n] = {
@@ -178,17 +183,31 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
         margin_percent: marginFor(price, costCents),
         warning: r.warning ?? null,
       };
-      blended += price * (normalized[n] / 100);
-    }
-    const optimized = Math.round(blended);
+      return {
+        strategy: n,
+        weight_pct: effective[n],
+        price_cents: price,
+        contribution_cents: (price * effective[n]) / 100,
+      };
+    });
+    const optimized = Math.round(breakdown.reduce((sum, item) => sum + item.contribution_cents, 0));
+    const rawTotal = STRATEGIES.reduce((sum, n) => sum + w[n], 0);
+    const normalized: Record<Strategy, number> = rawTotal > 0
+      ? Object.fromEntries(STRATEGIES.map((n) => [n, (w[n] / rawTotal) * 100])) as Record<Strategy, number>
+      : { cost_plus: 25, value_based: 25, keystone: 25, dynamic: 25 };
 
     return res.json({
       variant_id: variant.rows[0].id,
       cost_cents: costCents,
       weights_input: w,
       weights_normalized: normalized,
-      weights_balanced: Math.abs(total - 100) < 0.01,
+      weights_effective: effective,
+      weights_balanced: Math.abs(rawTotal - 100) < 0.01,
+      adjustments: notes,
+      trusted_competitors: competitorPricesCents.length,
+      stock_pct: stockPct,
       baselines,
+      breakdown,
       optimized_price_cents: optimized,
       margin_percent: marginFor(optimized, costCents),
     });

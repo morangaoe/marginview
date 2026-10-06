@@ -14,7 +14,7 @@ export interface PricingContext {
     observedAt: string | null;
     flag: string | null;
   }[];
-  stats: { avgCents: number; minCents: number; maxCents: number; count: number } | null;
+  stats: { medianCents: number; minCents: number; maxCents: number; count: number } | null;
 }
 
 const MUTED = "var(--mv-muted, #8fa396)";
@@ -40,10 +40,10 @@ export function CompetitorContext({ data, yourPriceCents }: { data: PricingConte
   return (
     <div style={{ border: `1px solid ${BORDER}`, borderRadius: 10, padding: 16, display: "grid", gap: 12 }}>
       <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-        <Stat label="Market average" value={data.stats ? formatCents(data.stats.avgCents) : "—"} />
+        <Stat label="Market median" value={data.stats ? formatCents(data.stats.medianCents) : "—"} />
         <Stat label="Lowest" value={data.stats ? formatCents(data.stats.minCents) : "—"} />
         <Stat label="Highest" value={data.stats ? formatCents(data.stats.maxCents) : "—"} />
-        <Stat label="Your price vs average" value={vs(data.stats?.avgCents ?? null)} />
+        <Stat label="Your price vs median" value={vs(data.stats?.medianCents ?? null)} />
       </div>
       <div className="mv-table-wrap">
         <table className="mv-table">

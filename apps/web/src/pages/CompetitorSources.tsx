@@ -12,6 +12,9 @@ type Source = {
   last_checked_at: string | null;
   last_status: "ok" | "failed" | "pending" | null;
   last_failure_reason: string | null;
+  paused?: boolean;
+  consecutive_failures?: number;
+  next_check_at?: string | null;
   competitor_product_id: string;
   competitor_name: string;
   price_selector: string | null;
@@ -198,10 +201,12 @@ export default function CompetitorSources() {
     }
   }
 
-  const isManual = (s: Source) => s.compliance_status !== "automated_allowed";
+  const isManual = (s: Source) => s.compliance_status === "manual_only" || s.compliance_status === "blocked";
 
   const status = (s: Source) => {
     if (isManual(s)) return <span className="mv-badge">Manual entry only</span>;
+    if (s.compliance_status === "unreviewed") return <span className="mv-badge warn">Checking site rules</span>;
+    if (s.paused) return <span className="mv-badge warn">Paused after repeated failures</span>;
     if (s.last_status === "failed") return <span className="mv-badge warn">Last check failed</span>;
     if (s.last_status === "ok") return <span className="mv-badge">Working</span>;
     return <span className="mv-badge">Not checked yet</span>;
@@ -320,7 +325,7 @@ export default function CompetitorSources() {
                   <td>{s.last_checked_at ? new Date(s.last_checked_at).toLocaleString() : "Never"}</td>
                   <td>
                     {status(s)}
-                    {s.last_status === "failed" && s.last_failure_reason && (
+                    {s.last_failure_reason && (s.last_status === "failed" || s.compliance_status !== "automated_allowed") && (
                       <>
                         <br />
                         <small>{s.last_failure_reason}</small>

@@ -18,5 +18,11 @@ export function useMv<T>(path: string | null) {
   return { data, error, loading, reload: load };
 }
 
-export const money = (cents: number | null | undefined) =>
-  cents == null ? "-" : (cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" });
+export const money = (cents: number | null | undefined, currency: string | null = "USD") => {
+  if (cents == null) return "-";
+  try {
+    return (cents / 100).toLocaleString(undefined, { style: "currency", currency: currency || "USD" });
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${currency ?? ""}`.trim();
+  }
+};

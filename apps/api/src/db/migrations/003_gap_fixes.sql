@@ -1,5 +1,5 @@
 -- Run once, after 002_modules.sql:
---   psql "$DATABASE_URL" -f apps/api/src/db/migrations/003_fixes.sql
+--   psql "$DATABASE_URL" -f apps/api/src/db/migrations/003_gap_fixes.sql
 -- Safe to re-run (every statement is idempotent).
 --
 -- Fixes columns/tables that routes already query but the schema never created,

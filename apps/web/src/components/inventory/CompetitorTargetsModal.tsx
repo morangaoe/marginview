@@ -5,7 +5,8 @@ import "../../styles/modules.css";
 
 interface Target {
   id: string; competitorName: string; sourceId: string; url: string;
-  complianceStatus: string; lastPriceCents: number | null; lastScrapedAt: string | null;
+  complianceStatus: string; lastPriceCents: number | null; lastCurrency: string | null; lastScrapedAt: string | null;
+  lastStatus: "ok" | "failed" | "pending" | null; lastFailureReason: string | null; paused: boolean;
 }
 
 export default function CompetitorTargetsModal({ variantId, title, onClose }: { variantId: string; title: string; onClose: () => void }) {
@@ -65,11 +66,16 @@ export default function CompetitorTargetsModal({ variantId, title, onClose }: { 
             {targets.map((t) => (
               <li key={t.id} className="mv-row" style={{ justifyContent: "space-between" }}>
                 <div style={{ minWidth: 0 }}>
-                  <strong>{t.competitorName}</strong> <span className="mv-muted">{money(t.lastPriceCents)}</span>
+                  <strong>{t.competitorName}</strong> <span className="mv-muted">{money(t.lastPriceCents, t.lastCurrency)}</span>
+                  {t.complianceStatus !== "automated_allowed" && <span className="mv-muted"> · {t.complianceStatus.replace("_", " ")}</span>}
+                  {t.paused && <span className="mv-muted"> · paused</span>}
                   <div className="mv-muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360 }}>{t.url}</div>
+                  {t.lastFailureReason && (t.lastStatus === "failed" || t.complianceStatus !== "automated_allowed") && (
+                    <div className="mv-err" style={{ fontSize: 12, maxWidth: 360 }}>{t.lastFailureReason}</div>
+                  )}
                 </div>
                 <div className="mv-row">
-                  <button className="mv-btn" disabled={busy === t.id || t.complianceStatus === "manual_only"} onClick={() => checkNow(t)}>Check price now</button>
+                  <button className="mv-btn" disabled={busy === t.id || t.complianceStatus === "manual_only" || t.complianceStatus === "blocked"} onClick={() => checkNow(t)}>Check price now</button>
                   <button className="mv-btn" disabled={busy === t.id} onClick={() => remove(t)}>Remove</button>
                 </div>
               </li>

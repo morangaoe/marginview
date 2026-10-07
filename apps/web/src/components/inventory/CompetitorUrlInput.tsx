@@ -2,7 +2,8 @@ import { useState } from "react";
 import { mv } from "../../lib/mv";
 import CompetitorSearchBar, { type Listing } from "./CompetitorSearchBar";
 
-export interface CompetitorEntry { competitorName: string; url: string }
+/** `pageToken` (from market search) lets the API swap a Google Shopping link for the seller's own page. */
+export interface CompetitorEntry { competitorName: string; url: string; pageToken?: string }
 
 /** Persist entries once the product exists (idempotent: re-saving the same URL is a no-op). */
 export async function saveCompetitorTargets(variantId: string, entries: CompetitorEntry[]) {
@@ -46,7 +47,8 @@ export default function CompetitorUrlInput({ value, onChange, searchHint = "" }:
         {value.map((v) => (
           <li key={v.url} className="mv-row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {v.competitorName || new URL(v.url).hostname} <span className="mv-muted">{v.url}</span>
+              {v.competitorName || new URL(v.url).hostname}{" "}
+              <span className="mv-muted">{v.pageToken && /google\./.test(v.url) ? "seller page will be looked up on save" : v.url}</span>
             </span>
             <button type="button" className="mv-btn" onClick={() => onChange(value.filter((x) => x.url !== v.url))} aria-label={`Remove ${v.url}`}>Remove</button>
           </li>
@@ -55,7 +57,7 @@ export default function CompetitorUrlInput({ value, onChange, searchHint = "" }:
       <button type="button" className="mv-btn" onClick={() => setShowSearch((s) => !s)} aria-expanded={showSearch}>
         {showSearch ? "Hide market search" : "Find competitor listings"}
       </button>
-      {showSearch && <CompetitorSearchBar initialQuery={searchHint} trackedUrls={value.map((v) => v.url)} onTrack={(l: Listing) => add({ competitorName: l.merchant, url: l.url })} />}
+      {showSearch && <CompetitorSearchBar initialQuery={searchHint} trackedUrls={value.map((v) => v.url)} onTrack={(l: Listing) => add({ competitorName: l.merchant, url: l.url ?? l.googleUrl ?? "", pageToken: l.pageToken ?? undefined })} />}
     </div>
   );
 }

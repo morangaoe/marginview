@@ -9,6 +9,10 @@ import { pool } from "../db/pool";
 import { scrapePrice, ScrapeError } from "../services/scraper/scrapePrice";
 import { activateTrialIfNeeded } from "../services/billing";
 import { validateSnapshot } from "../services/scraping/validateSnapshot";
+import { checkComplianceDetailed } from "../services/scraping/complianceCheck";
+import { logger, redactUrl } from "../utils/log";
+
+const log = logger("scrape");
 
 const ENFORCE_CREDITS = process.env.ENFORCE_SCRAPING_CREDITS === "true";
 const QUEUE = "scrape";
@@ -36,13 +40,34 @@ interface SourceRow {
 }
 
 function makeRedisConnection(): IORedis | null {
-  const url = process.env.REDIS_URL;
-  if (!url) return null;
-  return new IORedis(url, {
+  const url = process.env.REDIS_URL?.trim();
+  if (!url) {
+    log.error("REDIS_URL is not set. No competitor prices will be fetched: the scheduler and 'Check now' both need the queue.");
+    return null;
+  }
+  const safe = redactUrl(url);
+  const conn = new IORedis(url, {
     maxRetriesPerRequest: null,
-    retryStrategy: (times) => (times >= 10 ? null : Math.min(times * 1000, 30_000)),
+    // Never give up. Returning null here used to kill the connection for good
+    // after ~1 minute of Redis downtime, silently stopping all scraping.
+    retryStrategy: (times) => Math.min(times * 1000, 30_000),
     enableReadyCheck: false,
+    // Resolve both IPv4 and IPv6 (Railway's private network is IPv6-only).
+    family: 0,
   });
+  let lastError = "";
+  conn.on("ready", () => {
+    lastError = "";
+    log.info("redis connected", { url: safe });
+  });
+  conn.on("error", (err) => {
+    // ioredis emits the same error on every retry; log each distinct one once.
+    if (err.message === lastError) return;
+    lastError = err.message;
+    log.error("redis error", { url: safe, error: err.message });
+  });
+  conn.on("reconnecting", (ms: number) => log.debug("redis reconnecting", { inMs: ms }));
+  return conn;
 }
 
 const connection = makeRedisConnection();
@@ -88,8 +113,13 @@ export async function enqueueScrape(organizationId: string, sourceId: string): P
 }
 
 /** Called by the scheduler. Returns how many sources were queued. */
-export async function enqueueDueSources(limit = 200): Promise<number> {
-  if (!scrapeQueue) return 0;
+let warnedNoQueue = false;
+export async function enqueueDueSources(limit = 200, organizationId?: string): Promise<number> {
+  if (!scrapeQueue) {
+    if (!warnedNoQueue) log.warn("scheduler tick skipped: queue disabled because REDIS_URL is not set");
+    warnedNoQueue = true;
+    return 0;
+  }
   const { rows } = await pool.query<{ id: string; organization_id: string }>(
     `select ss.id, ss.organization_id
        from scraping_sources ss
@@ -101,9 +131,10 @@ export async function enqueueDueSources(limit = 200): Promise<number> {
            where j.scraping_source_id = ss.id
              and j.status in ('queued', 'running')
              and j.created_at > now() - interval '1 hour')
+        and ($2::uuid is null or ss.organization_id = $2::uuid)
       order by ss.next_check_at nulls first
       limit $1`,
-    [limit],
+    [limit, organizationId ?? null],
   );
   let queued = 0;
   for (const r of rows) {
@@ -111,7 +142,7 @@ export async function enqueueDueSources(limit = 200): Promise<number> {
       await queueRun(r.organization_id, r.id, false);
       queued++;
     } catch (e) {
-      console.warn("[scrape] could not queue source", r.id, (e as Error).message);
+      log.error("could not queue source", { source: r.id, error: (e as Error).message });
     }
   }
   return queued;
@@ -121,6 +152,16 @@ async function finishRun(jobRunId: string, status: "failed" | "succeeded", reaso
   await pool.query(
     "update scraping_job_runs set status = $2, failure_reason = $3, finished_at = now() where id = $1",
     [jobRunId, status, reason ? reason.slice(0, 1000) : null],
+  );
+}
+
+/** A run that was skipped on purpose: record why on both the run and the source so the UI can show it. */
+async function skipRun(jobRunId: string, sourceId: string, reason: string, fields: Record<string, unknown> = {}) {
+  log.warn("run skipped", { run: jobRunId, source: sourceId, reason, ...fields });
+  await finishRun(jobRunId, "failed", reason);
+  await pool.query(
+    `update scraping_sources set last_status = 'failed', last_failure_reason = $2, updated_at = now() where id = $1`,
+    [sourceId, reason.slice(0, 1000)],
   );
 }
 
@@ -151,6 +192,9 @@ async function recordFinalFailure(
     [sourceId, msg, AUTO_PAUSE_AFTER, blocked, BASE_BACKOFF_MIN, MAX_BACKOFF_MIN],
   );
   const row = r.rows[0];
+  log.error("source failed after all attempts", {
+    source: sourceId, run: jobRunId, consecutiveFailures: row?.consecutive_failures, paused: row?.paused, blocked, reason: msg,
+  });
   if (row?.paused && (row.consecutive_failures >= AUTO_PAUSE_AFTER || blocked)) {
     await pool.query(
       `insert into notifications (user_id, type, payload)
@@ -162,8 +206,26 @@ async function recordFinalFailure(
 
 async function processJob(job: Job<ScrapeJobData>) {
   const { jobRunId, sourceId, organizationId, manual } = job.data;
-  const isFinalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+  const attempt = job.attemptsMade + 1;
+  const isFinalAttempt = attempt >= (job.opts.attempts ?? 1);
+  try {
+    await runJob(job.data, attempt);
+  } catch (e) {
+    const err = e as Error;
+    log.warn("attempt failed", {
+      source: sourceId, run: jobRunId, attempt, of: job.opts.attempts ?? 1, manual: !!manual, error: err.message,
+    });
+    if (isFinalAttempt) {
+      const blocked = e instanceof ScrapeError && e.blocked;
+      await recordFinalFailure(jobRunId, sourceId, organizationId, err.message, blocked).catch((dbErr) =>
+        log.error("could not record failure", { source: sourceId, run: jobRunId, error: (dbErr as Error).message }),
+      );
+    }
+    throw e;
+  }
+}
 
+async function runJob({ jobRunId, sourceId, organizationId, manual }: ScrapeJobData, attempt: number) {
   await pool.query(
     "update scraping_job_runs set status = 'running', started_at = coalesce(started_at, now()) where id = $1",
     [jobRunId],
@@ -181,15 +243,31 @@ async function processJob(job: Job<ScrapeJobData>) {
       where ss.id = $1 and ss.organization_id = $2`,
     [sourceId, organizationId],
   );
-  if (!src.rowCount) return finishRun(jobRunId, "failed", "Source no longer exists.");
+  if (!src.rowCount) {
+    log.warn("run skipped", { run: jobRunId, source: sourceId, reason: "source no longer exists" });
+    return finishRun(jobRunId, "failed", "Source no longer exists.");
+  }
   const s = src.rows[0];
+  log.info("run started", { run: jobRunId, source: sourceId, url: s.url, attempt, manual: !!manual, compliance: s.compliance_status });
 
-  if (s.paused && !manual) return finishRun(jobRunId, "failed", "Tracking is paused for this source.");
+  if (s.paused && !manual) return skipRun(jobRunId, sourceId, "Tracking is paused for this source.");
+
+  // A source whose robots.txt couldn't be read yet is re-checked here, never scraped blind.
+  if (s.compliance_status === "unreviewed") {
+    const c = await checkComplianceDetailed(s.url);
+    if (c.status === "unreviewed") throw new Error(c.reason); // transient: retry with backoff
+    await pool.query("update scraping_sources set compliance_status = $2, updated_at = now() where id = $1", [
+      sourceId,
+      c.status,
+    ]);
+    s.compliance_status = c.status;
+    if (c.status === "manual_only") return skipRun(jobRunId, sourceId, c.reason, { url: s.url });
+  }
   if (s.compliance_status === "manual_only" || s.compliance_status === "blocked") {
-    return finishRun(jobRunId, "failed", `Source is ${s.compliance_status}.`);
+    return skipRun(jobRunId, sourceId, `Source is ${s.compliance_status.replace("_", " ")}; enter its price by hand.`);
   }
   if (ENFORCE_CREDITS && s.remaining <= 0) {
-    return finishRun(jobRunId, "failed", "Out of scraping credits. Upgrade your plan to keep tracking prices.");
+    return skipRun(jobRunId, sourceId, "Out of scraping credits. Upgrade your plan to keep tracking prices.");
   }
 
   const prior = await pool.query<{ price_cents: number }>(
@@ -201,22 +279,16 @@ async function processJob(job: Job<ScrapeJobData>) {
   );
   const lastKnown = prior.rows[0]?.price_cents ?? null;
 
-  let scraped;
-  try {
-    scraped = await scrapePrice(s.url, {
-      selector: s.selector,
-      defaultCurrency: s.default_currency,
-      signal: AbortSignal.timeout(JOB_TIMEOUT_MS),
-    });
-  } catch (e) {
-    const blocked = e instanceof ScrapeError && e.blocked;
-    if (isFinalAttempt) await recordFinalFailure(jobRunId, sourceId, organizationId, (e as Error).message, blocked);
-    throw e;
-  }
+  const scraped = await scrapePrice(s.url, {
+    selector: s.selector,
+    defaultCurrency: s.default_currency,
+    signal: AbortSignal.timeout(JOB_TIMEOUT_MS),
+  });
 
   const flag = validateSnapshot(scraped, lastKnown);
   const changed = lastKnown !== null && lastKnown !== scraped.priceCents;
 
+  let stored = 0;
   const client = await pool.connect();
   try {
     await client.query("begin");
@@ -229,13 +301,17 @@ async function processJob(job: Job<ScrapeJobData>) {
     );
     if (ENFORCE_CREDITS && !spent.rowCount) throw new Error("Out of scraping credits.");
 
-    await client.query(
+    const inserted = await client.query(
       `insert into price_snapshots
          (competitor_product_id, price_cents, currency, in_stock, source, validation_flag)
        select id, $2, $3, $4, 'scraped', $5
          from competitor_products where scraping_source_id = $1`,
       [sourceId, scraped.priceCents, scraped.currency, scraped.inStock, flag],
     );
+    stored = inserted.rowCount ?? 0;
+    if (!stored) {
+      log.warn("price found but no competitor product is linked to this source; nothing stored", { source: sourceId });
+    }
 
     await client.query(
       `update scraping_sources
@@ -274,12 +350,16 @@ async function processJob(job: Job<ScrapeJobData>) {
     client.release();
   }
 
-  await activateTrialIfNeeded(organizationId).catch((e) => console.warn("[scrape] trial activation failed", e));
+  log.info("price stored", {
+    run: jobRunId, source: sourceId, priceCents: scraped.priceCents, currency: scraped.currency,
+    method: scraped.method, via: scraped.via, flag, snapshots: stored,
+  });
+  await activateTrialIfNeeded(organizationId).catch((e) => log.warn("trial activation failed", { error: (e as Error).message }));
 }
 
 export function startScrapeWorker(): Worker<ScrapeJobData> | null {
   if (!connection) {
-    console.warn("[scrape] REDIS_URL not set. Scraper worker disabled.");
+    log.error("worker disabled: REDIS_URL is not set");
     return null;
   }
   const worker = new Worker<ScrapeJobData>(QUEUE, processJob, {
@@ -287,9 +367,10 @@ export function startScrapeWorker(): Worker<ScrapeJobData> | null {
     concurrency: Number(process.env.SCRAPE_CONCURRENCY ?? 3),
   });
   worker.on("failed", (job, err) =>
-    console.warn(`[scrape] job ${job?.id} attempt ${job?.attemptsMade} failed: ${err.message}`),
+    log.debug("job failed event", { job: job?.id, attemptsMade: job?.attemptsMade, error: err.message }),
   );
-  worker.on("completed", (job) => console.log(`[scrape] job ${job.id} done`));
-  worker.on("error", (err) => console.error("[scrape] worker error:", err));
+  worker.on("completed", (job) => log.debug("job completed", { job: job.id }));
+  worker.on("error", (err) => log.error("worker error", { error: err.message }));
+  log.info("worker started", { concurrency: Number(process.env.SCRAPE_CONCURRENCY ?? 3) });
   return worker;
 }

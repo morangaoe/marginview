@@ -1,4 +1,4 @@
--- Run after 003_fixes.sql
+-- Run after 003_gap_fixes.sql
 -- Idempotent. Adds scheduling state, allows the 'blocked' compliance state the
 -- cycle already uses, and the org default currency used for price parsing.
 begin;

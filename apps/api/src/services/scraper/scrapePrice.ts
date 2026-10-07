@@ -6,6 +6,9 @@
  */
 import { extractPrice, type ExtractOptions, type ExtractedPrice } from "./priceExtractor";
 import { fetchHtmlViaBrowser } from "./brightDataClient";
+import { logger } from "../../utils/log";
+
+const log = logger("fetch");
 
 export type ScrapeMethod = "direct" | "api_basic" | "api_rendered" | "api_premium" | "bright_data_browser";
 export interface ScrapeResult extends ExtractedPrice {
@@ -112,17 +115,29 @@ export async function scrapePrice(url: string, opts: ScrapeOptions = {}): Promis
   const reasons: string[] = [];
   for (const tier of tiers) {
     if (tier.when && !tier.when()) continue;
-    if (signal?.aborted) throw new ScrapeError("Scrape cancelled or timed out", false);
+    if (signal?.aborted) throw new ScrapeError(`Scrape cancelled or timed out | ${reasons.join(" | ")}`, false);
+    const started = Date.now();
     try {
       const html = await tier.run();
       const hit = extractPrice(html, extract);
-      if (hit) return { ...hit, method: tier.method };
-      reasons.push(`${tier.method}: no price found`);
+      if (hit) {
+        log.debug("tier found price", { url, tier: tier.method, priceCents: hit.priceCents, via: hit.via, ms: Date.now() - started });
+        return { ...hit, method: tier.method };
+      }
+      const why = extract.selector
+        ? `no price found (selector "${extract.selector}" matched nothing usable, and no JSON-LD/meta price)`
+        : "no price found in JSON-LD, meta tags or common price elements";
+      reasons.push(`${tier.method}: ${why}`);
+      log.debug("tier found no price", { url, tier: tier.method, htmlBytes: html.length, ms: Date.now() - started });
     } catch (e) {
       const err = e as Error;
       if (err instanceof HttpStatusError && BLOCKED_STATUSES.has(err.status)) blocked = true;
       reasons.push(`${tier.method}: ${err.message}`);
+      log.debug("tier failed", { url, tier: tier.method, error: err.message, ms: Date.now() - started });
     }
+  }
+  if (!hasProvider && !hasBrightData) {
+    reasons.push("no fallback configured (set SCRAPING_API_KEY or BRIGHTDATA_WS_ENDPOINT for sites that block direct fetches)");
   }
   throw new ScrapeError(reasons.join(" | ") || "No fetch method available", blocked);
 }

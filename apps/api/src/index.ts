@@ -3,6 +3,7 @@ import cors from "cors";
 import "dotenv/config";
 import express from "express";
 import { pool } from "./db/pool";
+import { checkScrapingSchema } from "./db/migrate";
 import { startScrapeWorker } from "./queues/scrapeQueue";
 import { requireAuth } from "./middleware/auth";
 import { requireModule } from "./middleware/plan";
@@ -112,6 +113,8 @@ const server = app.listen(port, () => {
   console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   // Start the Phase 2 scraping scheduler after the server is up
   scheduler = startScrapingScheduler(pool);
+  void checkScrapingSchema();
+  if (!process.env.SERPAPI_KEY) console.warn("[config] SERPAPI_KEY is not set. Market search and similar products are disabled.");
 });
 
 // Railway sends SIGTERM on redeploy; close cleanly so in-flight requests finish.

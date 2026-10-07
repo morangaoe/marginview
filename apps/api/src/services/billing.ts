@@ -10,6 +10,9 @@ export interface PlanUsage {
   nudge: { level: "none" | "approaching" | "over"; message: string } | null;
   trialActivatedAt: string | null;
   status: string;
+  paid: boolean; // has a live Stripe subscription
+  cancelAtPeriodEnd: boolean;
+  currentPeriodEnd: string | null;
 }
 
 export async function getOrgTier(organizationId: string): Promise<{ tier: Tier; effectiveTier: Tier; status: string }> {
@@ -39,8 +42,12 @@ export async function getPlanUsage(organizationId: string): Promise<PlanUsage> {
     pricing_model: { tracked_sources_included: number | null };
     status: string;
     trial_activated_at: string | null;
+    stripe_subscription_id: string | null;
+    cancel_at_period_end: boolean;
+    current_period_end: string | null;
   }>(
-    `select p.name as plan_name, p.pricing_model, s.status, s.trial_activated_at
+    `select p.name as plan_name, p.pricing_model, s.status, s.trial_activated_at,
+            s.stripe_subscription_id, s.cancel_at_period_end, s.current_period_end
      from subscriptions s
      join plans p on p.id = s.plan_id
      where s.organization_id = $1
@@ -85,6 +92,9 @@ export async function getPlanUsage(organizationId: string): Promise<PlanUsage> {
     nudge,
     trialActivatedAt: sub?.trial_activated_at ?? null,
     status: sub?.status ?? "trialing",
+    paid: !!sub?.stripe_subscription_id && sub.status !== "canceled",
+    cancelAtPeriodEnd: sub?.cancel_at_period_end ?? false,
+    currentPeriodEnd: sub?.current_period_end ?? null,
   };
 }
 

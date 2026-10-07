@@ -27,7 +27,7 @@ export function minTierFor(module: ModuleKey): Tier {
     .find((tier) => TIER_MODULES[tier].includes(module))!;
 }
 
-/** Display-only annual discount. Checkout is not implemented. */
+/** Annual discount. Keep in sync with ANNUAL_DISCOUNT in apps/api/src/services/stripeBilling.ts. */
 export const ANNUAL_DISCOUNT = 0.2;
 
 export interface PlanCard {

@@ -10,7 +10,7 @@ import { requireModule } from "./middleware/plan";
 import { adminRouter } from "./routes/admin";
 import { assistantRouter } from "./routes/assistant";
 import { authRouter } from "./routes/auth";
-import { billingRouter } from "./routes/billing";
+import { billingRouter, billingWebhookRouter } from "./routes/billing";
 import competitorsRouter from "./routes/competitors";
 import inventoryRouter from "./routes/inventory";
 import onboardingRouter from "./routes/onboarding";
@@ -59,6 +59,8 @@ if (!process.env.DATABASE_URL) {
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(cors({ origin: allowedOrigins }));
+// Stripe webhook needs the raw body for signature checks, so it goes before express.json().
+app.use("/api/billing/webhook", billingWebhookRouter);
 // Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.
 app.use(express.json({ limit: "5mb" }));
 // Logs every 5xx to error_events for the platform admin dashboard.

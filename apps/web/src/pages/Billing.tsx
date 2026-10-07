@@ -1,6 +1,6 @@
 import { SkeletonRows } from "../components/Skeleton";
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import OrgBillingOverview from "../components/billing/OrgBillingOverview";
 import { usePlanAccess } from "../plan/PlanContext";
@@ -17,6 +17,9 @@ interface PlanUsage {
   status: string;
   tier: "margin_intelligence" | "operations_pro" | "enterprise";
   effectiveTier: "margin_intelligence" | "operations_pro" | "enterprise";
+  paid: boolean;
+  cancelAtPeriodEnd: boolean;
+  currentPeriodEnd: string | null;
 }
 
 function priceOf(card: PlanCard, annual: boolean) {
@@ -30,13 +33,45 @@ export function Billing() {
   const [usage, setUsage] = useState<PlanUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [annual, setAnnual] = useState(false);
+  const [checkoutEnabled, setCheckoutEnabled] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [params] = useSearchParams();
+  const checkoutResult = params.get("checkout");
 
   useEffect(() => {
     api
       .get<PlanUsage>("/billing/usage")
       .then(setUsage)
       .catch(() => setError("Could not load your plan usage."));
+    api.get<{ checkoutEnabled: boolean }>("/billing/config").then((c) => setCheckoutEnabled(c.checkoutEnabled)).catch(() => {});
   }, []);
+
+  // Stripe confirms via webhook, which can land a moment after the redirect.
+  useEffect(() => {
+    if (checkoutResult !== "success") return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      api.get<PlanUsage>("/billing/usage").then((u) => {
+        setUsage(u);
+        if (u.paid || tries >= 10) clearInterval(timer);
+      }).catch(() => clearInterval(timer));
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [checkoutResult]);
+
+  async function redirectTo(path: string, body: unknown, key: string) {
+    setBusy(key);
+    setNotice(null);
+    try {
+      const { url } = await api.post<{ url: string }>(path, body);
+      window.location.assign(url);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not open checkout. Try again.");
+      setBusy(null);
+    }
+  }
 
   if (error) return <p style={{ color: "var(--critical)" }}>{error}</p>;
   if (!usage || !tier) return <SkeletonRows rows={5} />;
@@ -54,6 +89,19 @@ export function Billing() {
     }
     if (card.tier === currentTier) return <button className="bp-btn" disabled>Current plan</button>;
     if (card.tier === "enterprise") return <Link className="bp-btn" to="/contact?plan=enterprise">Contact sales</Link>;
+    if (checkoutEnabled) {
+      // Already paying: plan changes go through the Stripe portal.
+      if (usage!.paid) return <button className="bp-btn" disabled={busy !== null} onClick={() => redirectTo("/billing/portal", undefined, "portal")}>Change in billing portal</button>;
+      return (
+        <button
+          className={`bp-btn ${TIER_RANK[card.tier] > TIER_RANK[currentTier] ? "primary" : ""}`}
+          disabled={busy !== null}
+          onClick={() => redirectTo("/billing/checkout", { tier: card.tier, interval: annual ? "year" : "month" }, card.tier)}
+        >
+          {busy === card.tier ? "Redirecting…" : `Subscribe to ${name}`}
+        </button>
+      );
+    }
     if (TIER_RANK[card.tier] > TIER_RANK[currentTier]) return <Link className="bp-btn primary" to={`/contact?plan=${card.tier}`}>Upgrade to {name}</Link>;
     return <Link className="bp-btn" to={`/contact?plan=${card.tier}`}>Switch to {name}</Link>;
   }
@@ -95,7 +143,24 @@ export function Billing() {
             );
           })}
         </div>
-        <p className="bp-note">Plan changes are handled by our team for now. Self-serve checkout is not available yet.</p>
+        {checkoutResult === "success" && <div className="bp-trial" role="status">Payment received. Your plan updates in a few seconds.</div>}
+        {checkoutResult === "canceled" && <p className="bp-note">Checkout was canceled. You haven't been charged.</p>}
+        {notice && <p className="bp-note" role="alert" style={{ color: "var(--critical)" }}>{notice}</p>}
+        {usage.paid ? (
+          <p className="bp-note">
+            {usage.cancelAtPeriodEnd && usage.currentPeriodEnd
+              ? `Your plan ends on ${new Date(usage.currentPeriodEnd).toLocaleDateString()}. `
+              : usage.currentPeriodEnd ? `Renews ${new Date(usage.currentPeriodEnd).toLocaleDateString()}. ` : ""}
+            {usage.status === "past_due" && "Your last payment failed. Update your card to keep your plan. "}
+            <button className="bp-btn" disabled={busy !== null} onClick={() => redirectTo("/billing/portal", undefined, "portal")}>
+              Manage billing &amp; invoices
+            </button>
+          </p>
+        ) : !checkoutEnabled ? (
+          <p className="bp-note">Plan changes are handled by our team for now.</p>
+        ) : (
+          <p className="bp-note">Secure checkout by Stripe. Cards, Apple Pay and Google Pay accepted. Only workspace owners can subscribe.</p>
+        )}
       </section>
 
       <div className="card">

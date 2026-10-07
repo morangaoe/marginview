@@ -14,7 +14,7 @@ const NAV_TABS: { to: string; label: string; module: ModuleKey; end?: boolean }[
 ];
 
 export function AppShell() {
-  const { user, logout } = useAuth();
+  const { user, me, logout } = useAuth();
   const { can, loading, effectiveTier } = usePlanAccess();
   const navigate = useNavigate();
   const isLocked = (module: ModuleKey) => !loading && !can(module);
@@ -45,6 +45,7 @@ export function AppShell() {
         <div style={{ borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
         <NavLink to="/app/settings" className="mv-nav-item">Settings</NavLink>
         {user?.role === "owner" && <NavLink to="/app/admin" className="mv-nav-item">Team & access</NavLink>}
+        {me?.isPlatformAdmin && <NavLink to="/app/platform" className="mv-nav-item">Platform admin</NavLink>}
 
         <div style={{ flex: 1 }} />
         <div style={{ padding: "12px 24px", borderTop: "1px solid var(--hairline)" }}>

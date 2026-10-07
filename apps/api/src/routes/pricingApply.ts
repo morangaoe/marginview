@@ -5,6 +5,7 @@
  */
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
+import { captureError } from "../services/errorLog";
 import { requireRole } from "../middleware/auth";
 import { marginFor } from "../services/pricingStrategies";
 
@@ -77,7 +78,7 @@ router.post("/:variantId/apply", canChangePrice, async (req: Request, res: Respo
     });
   } catch (err) {
     await client.query("rollback").catch(() => undefined);
-    console.error("POST /pricing/:variantId/apply failed", err);
+    captureError(req, err, "POST /pricing/:variantId/apply failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();
@@ -135,7 +136,7 @@ router.post("/:variantId/undo", canChangePrice, async (req: Request, res: Respon
     return res.json({ restored_price_cents: restore, undone_price_cents: undone });
   } catch (err) {
     await client.query("rollback").catch(() => undefined);
-    console.error("POST /pricing/:variantId/undo failed", err);
+    captureError(req, err, "POST /pricing/:variantId/undo failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();

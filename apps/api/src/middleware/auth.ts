@@ -1,38 +1,110 @@
+import "dotenv/config";
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { pool } from "../db/pool";
 import { AuthedUser } from "../types";
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+const WEAK_SECRETS = new Set(["dev-secret", "change-me-in-production", "secret", "changeme", "jwt-secret"]);
+const isDeployed = () => process.env.NODE_ENV === "production" || !!process.env.RAILWAY_ENVIRONMENT;
+
+let cachedSecret: string | null = null;
 
 /**
- * FIX: The onboarding route signs tokens with claims:
- *   { sub, id, userId, email, organizationId, role }
- * The old auth.ts only expected { id, organizationId, role }.
- *
- * This middleware now reads all three id aliases so tokens from BOTH
- * /api/auth/login and /api/onboarding/register are accepted.
+ * The signing secret. In production a missing or placeholder secret is fatal:
+ * anyone who knows the fallback could mint a token for any workspace.
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
+export function jwtSecret(): string {
+  if (cachedSecret) return cachedSecret;
+  const s = process.env.JWT_SECRET?.trim();
+  if (!s || WEAK_SECRETS.has(s)) {
+    if (isDeployed()) {
+      throw new Error("JWT_SECRET is missing or a placeholder. Set it to a long random value (e.g. `openssl rand -base64 48`).");
+    }
+    console.warn("[config] JWT_SECRET is not set. Using an insecure dev secret (local only).");
+    cachedSecret = "dev-secret";
+  } else {
+    if (s.length < 32) console.warn("[config] JWT_SECRET is shorter than 32 characters. Use a longer random value.");
+    cachedSecret = s;
+  }
+  return cachedSecret;
+}
+
+/** Comma-separated PLATFORM_ADMIN_EMAILS: people who can see every workspace, user and error. */
+export function isPlatformAdminEmail(email: string): boolean {
+  const list = (process.env.PLATFORM_ADMIN_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return list.includes(email.trim().toLowerCase());
+}
+
+/**
+ * Self-service sign-up is off unless ALLOW_PUBLIC_SIGNUP=true. With it off, the only
+ * way in is an account created by a workspace owner or a platform admin.
+ */
+export function publicSignupEnabled(): boolean {
+  return process.env.ALLOW_PUBLIC_SIGNUP === "true";
+}
+
+export const SIGNUP_DISABLED = {
+  error: "Marginview is invite-only. Ask your workspace owner or administrator to add you.",
+  code: "signup_disabled",
+} as const;
+
+const UUID_RE =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const SESSION_SQL = `
+  select u.id, u.organization_id, u.email, u.status, u.password_changed_at, r.name as role
+    from users u
+    join user_roles ur on ur.user_id = u.id and ur.location_id is null
+    join roles r on r.id = ur.role_id
+   where u.id = $1 and u.deleted_at is null
+   limit 1`;
+
+/**
+ * Verifies the token, then reloads the user from the database on every request.
+ * Organization and role come from the database, never from the token, so disabling
+ * a user, changing their role or resetting their password takes effect immediately.
+ */
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Missing or malformed Authorization header" });
   }
+
+  let claims: Record<string, any>;
   try {
-    const token = header.slice("Bearer ".length);
-    const raw = jwt.verify(token, JWT_SECRET) as Record<string, any>;
-
-    // Normalise: accept id | userId | sub in that priority order
-    const id: string | undefined = raw.id ?? raw.userId ?? raw.sub;
-    const organizationId: string | undefined = raw.organizationId ?? raw.organization_id ?? raw.org_id;
-
-    if (!id || !organizationId || !raw.role) {
-      return res.status(401).json({ error: "Token is missing required claims" });
-    }
-
-    req.user = { id, organizationId, role: raw.role } as AuthedUser;
-    next();
+    claims = jwt.verify(header.slice("Bearer ".length), jwtSecret(), { algorithms: ["HS256"] }) as Record<string, any>;
   } catch {
-    res.status(401).json({ error: "Invalid or expired token" });
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  // Lead tokens from /api/public share the secret but are not sessions.
+  const id = claims.id ?? claims.userId ?? claims.sub;
+  if (claims.kind === "lead" || typeof id !== "string" || !UUID_RE.test(id)) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  try {
+    const { rows } = await pool.query(SESSION_SQL, [id]);
+    const u = rows[0];
+    if (!u || u.status !== "active") {
+      return res.status(401).json({ error: "This account is disabled or no longer exists." });
+    }
+    const changedAt: Date | null = u.password_changed_at;
+    if (changedAt && typeof claims.iat === "number" && claims.iat < Math.floor(changedAt.getTime() / 1000)) {
+      return res.status(401).json({ error: "Your password was changed. Sign in again." });
+    }
+    req.user = {
+      id: u.id,
+      organizationId: u.organization_id,
+      role: u.role,
+      email: u.email,
+      isPlatformAdmin: isPlatformAdminEmail(u.email),
+    };
+    next();
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -49,16 +121,20 @@ export function requireRole(...roles: AuthedUser["role"][]) {
   };
 }
 
-/**
- * Signs a token whose claims exactly match what requireAuth now reads.
- * Called by /api/auth/login. The onboarding route signs its own token
- * directly, but uses the same field names, so both are now compatible.
- */
-export function signToken(user: AuthedUser): string {
-  // Include sub so tools like jwt.io can inspect the token correctly
+/** Platform operators only (PLATFORM_ADMIN_EMAILS). Must run after requireAuth. */
+export function requirePlatformAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.user?.isPlatformAdmin) {
+    // 404 rather than 403 so the admin surface isn't advertised.
+    return res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+  }
+  next();
+}
+
+/** Claims are for the UI only; requireAuth re-reads organization and role from the database. */
+export function signToken(user: Pick<AuthedUser, "id" | "organizationId" | "role">): string {
   return jwt.sign(
     { sub: user.id, id: user.id, organizationId: user.organizationId, role: user.role },
-    JWT_SECRET,
-    { expiresIn: "12h" }
+    jwtSecret(),
+    { expiresIn: "12h", algorithm: "HS256" },
   );
 }

@@ -12,6 +12,7 @@ import Inventory from "./pages/Inventory";
 import { Login } from "./pages/Login";
 import { Privacy } from "./pages/Privacy";
 import Pricing from "./pages/Pricing";
+import { PlatformAdmin } from "./pages/PlatformAdmin";
 import { PricingList } from "./pages/PricingList";
 import { Procurement } from "./pages/Procurement";
 import { Settings } from "./pages/Settings";
@@ -68,6 +69,7 @@ export function App() {
           <Route path="/app/settings" element={<Settings />} />
           <Route path="/app/settings/competitor-sources" element={<CompetitorSources />} />
           <Route path="/app/admin" element={<Admin />} />
+          <Route path="/app/platform" element={<PlatformAdmin />} />
         </Route>
       </Route>
     </Routes>

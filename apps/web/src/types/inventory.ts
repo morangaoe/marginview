@@ -1,5 +1,7 @@
 // Shared API types for Inventory and Pricing. All money is integer CENTS.
 
+import { noteResponseStatus } from "../auth/session";
+
 export const CATEGORIES = [
   "Skincare",
   "Haircare",
@@ -190,6 +192,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
     );
   }
 
+  noteResponseStatus(res.status);
   if (res.status === 204) return undefined as T;
 
   const body = await res.json().catch(() => undefined);

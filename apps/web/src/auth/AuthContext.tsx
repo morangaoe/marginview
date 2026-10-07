@@ -7,11 +7,25 @@ import {
   useRef,
   useState,
 } from "react";
+import { request } from "../lib/useApi";
 import { decodeJwt, isExpired, JwtPayload } from "./jwt";
+import { SESSION_ENDED_EVENT } from "./session";
+
+/** The signed-in user as the server sees it right now (GET /api/auth/me). */
+export interface Me {
+  id: string;
+  email: string;
+  fullName: string;
+  organizationId: string;
+  organizationName: string;
+  role: JwtPayload["role"];
+  isPlatformAdmin: boolean;
+}
 
 interface AuthState {
   token: string | null;
   user: JwtPayload | null;
+  me: Me | null;
   login: (token: string) => void;
   logout: () => void;
 }
@@ -19,6 +33,7 @@ interface AuthState {
 const AuthContext = createContext<AuthState>({
   token: null,
   user: null,
+  me: null,
   login: () => {},
   logout: () => {},
 });
@@ -45,6 +60,7 @@ function loadToken(): string | null {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(loadToken);
+  const [me, setMe] = useState<Me | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const user = token ? decodeJwt(token) : null;
@@ -78,6 +94,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(newToken);
   }, []);
 
+  // The server ends sessions on disable or password reset; any 401 lands here.
+  useEffect(() => {
+    window.addEventListener(SESSION_ENDED_EVENT, logout);
+    return () => window.removeEventListener(SESSION_ENDED_EVENT, logout);
+  }, [logout]);
+
+  useEffect(() => {
+    setMe(null);
+    if (!token) return;
+    let cancelled = false;
+    request<Me>("/auth/me")
+      .then((m) => !cancelled && setMe(m))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   // Auto-logout timer: fires when the token hits its expiry time.
   useEffect(() => {
     if (timerRef.current) {
@@ -99,7 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user?.exp, logout]);
 
   return (
-    <AuthContext.Provider value={{ token, user, login, logout }}>
+    <AuthContext.Provider value={{ token, user, me, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

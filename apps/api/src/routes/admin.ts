@@ -3,6 +3,7 @@
  *  GET  /api/admin/members       — list all team members and their roles
  *  POST /api/admin/members       — invite a new user (creates account, sends no email in Phase 1)
  *  PATCH /api/admin/members/:id  — change role or status
+ *  POST /api/admin/members/:id/reset-password — set a new password, shown once
  */
 
 import bcrypt from "bcryptjs";
@@ -10,13 +11,14 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool, query } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { BCRYPT_ROUNDS, generatePassword, passwordSchema, setPassword } from "./auth";
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth); // all routes require a valid token
 
 adminRouter.get("/members", requireRole("owner"), async (req, res) => {
   const rows = await query(
-    `select u.id, u.email, u.full_name, u.status, r.name as role, u.created_at
+    `select u.id, u.email, u.full_name, u.status, r.name as role, u.created_at, u.last_login_at
      from users u
      join user_roles ur on ur.user_id = u.id and ur.location_id is null
      join roles r on r.id = ur.role_id
@@ -31,22 +33,26 @@ const inviteSchema = z.object({
   email: z.string().email(),
   fullName: z.string().min(1),
   role: z.enum(["owner", "pricing_manager", "inventory_manager", "viewer"]),
-  temporaryPassword: z.string().min(8),
+  // Omit to have one generated; either way it is returned once in the response.
+  temporaryPassword: passwordSchema.optional(),
 });
 
 adminRouter.post("/members", requireRole("owner"), async (req, res) => {
   const parsed = inviteSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { email, fullName, role, temporaryPassword } = parsed.data;
+  const { fullName, role } = parsed.data;
+  const email = parsed.data.email.trim().toLowerCase();
+  const temporaryPassword = parsed.data.temporaryPassword ?? generatePassword();
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+    const passwordHash = await bcrypt.hash(temporaryPassword, BCRYPT_ROUNDS);
 
+    // Active straight away: the owner adding them is the approval. ('invited' can't sign in.)
     const [user] = (await client.query(
       `insert into users (organization_id, email, password_hash, full_name, status)
-       values ($1, $2, $3, $4, 'invited') returning id, email`,
+       values ($1, $2, $3, $4, 'active') returning id, email`,
       [req.user!.organizationId, email, passwordHash, fullName]
     )).rows;
 
@@ -57,11 +63,11 @@ adminRouter.post("/members", requireRole("owner"), async (req, res) => {
     );
 
     await client.query("COMMIT");
-    res.status(201).json({ userId: user.id, email: user.email, note: "In production, send the temporary password to the user by email." });
+    res.status(201).json({ userId: user.id, email: user.email, temporaryPassword });
   } catch (err) {
     await client.query("ROLLBACK");
     if ((err as any).code === "23505") {
-      return res.status(409).json({ error: "A user with that email already exists in this organization" });
+      return res.status(409).json({ error: "A user with that email already exists" });
     }
     throw err;
   } finally {
@@ -86,6 +92,16 @@ adminRouter.patch("/members/:id", requireRole("owner"), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+
+    // Tenant check first: the role change below is keyed on user id alone.
+    const member = await client.query(
+      "select 1 from users where id = $1 and organization_id = $2 and deleted_at is null for update",
+      [req.params.id, req.user!.organizationId]
+    );
+    if (!member.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Team member not found" });
+    }
 
     if (status !== undefined) {
       await client.query(
@@ -112,6 +128,23 @@ adminRouter.patch("/members/:id", requireRole("owner"), async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// Sets a new password for a member of this workspace and signs them out everywhere.
+// The password is returned once so the owner can pass it on; it is never stored readable.
+adminRouter.post("/members/:id/reset-password", requireRole("owner"), async (req, res) => {
+  const parsed = z.object({ password: passwordSchema.optional() }).safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid password" });
+
+  const member = await query(
+    "select 1 from users where id = $1 and organization_id = $2 and deleted_at is null",
+    [req.params.id, req.user!.organizationId]
+  );
+  if (!member.length) return res.status(404).json({ error: "Team member not found" });
+
+  const password = parsed.data.password ?? generatePassword();
+  await setPassword(req.params.id, password);
+  res.json({ password });
 });
 
 // Org settings

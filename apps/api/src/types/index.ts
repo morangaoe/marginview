@@ -10,6 +10,9 @@ export interface AuthedUser {
   id: string;
   organizationId: string;
   role: "owner" | "pricing_manager" | "inventory_manager" | "viewer";
+  email?: string;
+  /** Listed in PLATFORM_ADMIN_EMAILS: can see every workspace, user and error. */
+  isPlatformAdmin?: boolean;
 }
 
 declare global {

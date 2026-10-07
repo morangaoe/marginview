@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { noteResponseStatus } from "../auth/session";
 
 const API_ORIGIN = import.meta.env.VITE_API_URL ?? "";
 
@@ -27,6 +28,7 @@ export async function request<T = unknown>(path: string, init: RequestInit = {})
     },
   });
 
+  noteResponseStatus(res.status);
   if (res.status === 204) return undefined as T;
   if (res.ok) return res.json() as Promise<T>;
 

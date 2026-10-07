@@ -6,6 +6,7 @@ import { askAIChat, type ChatTurn } from "../services/gemini";
 import { getOrgTier } from "../services/billing";
 import { APP_GUIDE, ASSISTANT_PERSONA } from "../services/assistantGuide";
 import { HttpError } from "../utils/http";
+import { recordEvent } from "../services/errorLog";
 
 export const assistantRouter = Router();
 assistantRouter.use(requireAuth);
@@ -277,6 +278,15 @@ assistantRouter.post("/ask", async (req, res) => {
     } catch (err) {
       // Quota, missing key, or provider outage must not break the assistant: keep the rule-based answer.
       const reason = err instanceof HttpError ? err.message : "The AI service is unavailable.";
+      void recordEvent({
+        source: "ai",
+        level: err instanceof HttpError ? "warn" : "error",
+        message: `Assistant fell back to rule-based answer: ${(err as Error)?.message ?? String(err)}`,
+        stack: (err as Error)?.stack,
+        path: "/api/assistant/ask",
+        userId,
+        organizationId,
+      });
       referencedRecords = { ...referencedRecords, aiUnavailable: reason };
       answer = `${answer}\n\n(Smart answers are unavailable right now: ${reason})`;
     }

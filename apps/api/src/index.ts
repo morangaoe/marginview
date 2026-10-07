@@ -3,9 +3,9 @@ import cors from "cors";
 import "dotenv/config";
 import express from "express";
 import { pool } from "./db/pool";
-import { checkScrapingSchema } from "./db/migrate";
+import { checkScrapingSchema, runMigrations } from "./db/migrate";
 import { startScrapeWorker } from "./queues/scrapeQueue";
-import { requireAuth } from "./middleware/auth";
+import { jwtSecret, requireAuth } from "./middleware/auth";
 import { requireModule } from "./middleware/plan";
 import { adminRouter } from "./routes/admin";
 import { assistantRouter } from "./routes/assistant";
@@ -26,7 +26,10 @@ import { suppliersRouter } from "./routes/suppliers";
 import { integrationsRouter } from "./routes/integrations";
 import { aiRouter } from "./routes/ai";
 import { dashboardRouter } from "./routes/dashboard";
+import { errorsRouter } from "./routes/errors";
+import { platformRouter } from "./routes/platform";
 import { startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
+import { errorCapture, recordEvent } from "./services/errorLog";
 import { HttpError } from "./utils/http";
 
 const app = express();
@@ -43,8 +46,10 @@ const allowedOrigins = (
   .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
-if (!process.env.JWT_SECRET) {
-  console.warn("[config] JWT_SECRET is not set. Falling back to an insecure dev secret.");
+// Fails fast in production when JWT_SECRET is missing or a placeholder.
+jwtSecret();
+if (!process.env.PLATFORM_ADMIN_EMAILS) {
+  console.warn("[config] PLATFORM_ADMIN_EMAILS is not set. Nobody can open the platform admin dashboard.");
 }
 if (!process.env.DATABASE_URL) {
   console.warn("[config] DATABASE_URL is not set. Database queries will fail.");
@@ -52,9 +57,12 @@ if (!process.env.DATABASE_URL) {
 
 // Railway/Vercel sit behind one proxy hop; without this req.ip is the proxy and every visitor shares one quota.
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
 app.use(cors({ origin: allowedOrigins }));
 // Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.
 app.use(express.json({ limit: "5mb" }));
+// Logs every 5xx to error_events for the platform admin dashboard.
+app.use(errorCapture);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -62,6 +70,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/auth", authRouter);
 app.use("/api/onboarding", onboardingRouter);
 app.use("/api/public", publicRouter);
+app.use("/api/errors", errorsRouter);
 
 // Protected: these three routers read req.user, so requireAuth must run first.
 app.use("/api/products", requireAuth, productsRouter);
@@ -88,6 +97,7 @@ app.use("/api/billing", billingRouter);
 app.use("/api/scraping", scrapingRouter);
 app.use("/api/suppliers", requireAuth, requireModule("procurement"), suppliersRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/platform", platformRouter);
 
 // Unknown /api routes get JSON instead of Express's default HTML 404.
 app.use("/api", (req, res) => {
@@ -95,7 +105,7 @@ app.use("/api", (req, res) => {
 });
 
 // Centralized error handler
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (err instanceof HttpError) {
     return res.status(err.status).json({ error: err.message });
   }
@@ -106,24 +116,46 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
     return res.status(400).json({ error: "Invalid JSON in request body." });
   }
   console.error(err);
+  res.locals.capturedError = { message: err?.message ?? String(err), stack: err?.stack };
   res.status(500).json({ error: "Something went wrong on our end. Please try again." });
 });
+
+process.on("unhandledRejection", (reason) => {
+  const e = reason instanceof Error ? reason : new Error(String(reason));
+  console.error("[api] unhandled promise rejection", e);
+  void recordEvent({ source: "worker", message: `Unhandled rejection: ${e.message}`, stack: e.stack });
+});
+
+// Migrations are idempotent; running them here keeps the code and schema in step on every
+// deploy (auth now reads users.password_changed_at). Set AUTO_MIGRATE=false to run them by hand.
+async function migrateOnBoot() {
+  if (process.env.AUTO_MIGRATE === "false") return;
+  try {
+    await runMigrations();
+  } catch (e) {
+    console.error("[migrate] startup migration failed:", (e as Error).message);
+  }
+}
 
 const port = Number(process.env.PORT) || 4000;
 const scrapeWorker = startScrapeWorker();
 let scheduler: SchedulerHandle | null = null;
-const server = app.listen(port, () => {
-  console.log(`Marginview API listening on port ${port}`);
-  console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
-  // Start the Phase 2 scraping scheduler after the server is up
-  scheduler = startScrapingScheduler(pool);
-  void checkScrapingSchema();
-  if (!process.env.SERPAPI_KEY) console.warn("[config] SERPAPI_KEY is not set. Market search and similar products are disabled.");
+let server: ReturnType<typeof app.listen> | undefined;
+void migrateOnBoot().then(() => {
+  server = app.listen(port, () => {
+    console.log(`Marginview API listening on port ${port}`);
+    console.log(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
+    // Start the Phase 2 scraping scheduler after the server is up
+    scheduler = startScrapingScheduler(pool);
+    void checkScrapingSchema();
+    if (!process.env.SERPAPI_KEY) console.warn("[config] SERPAPI_KEY is not set. Market search and similar products are disabled.");
+  });
 });
 
 // Railway sends SIGTERM on redeploy; close cleanly so in-flight requests finish.
 const shutdown = (signal: string) => {
   console.log(`[api] Received ${signal} — shutting down gracefully`);
+  if (!server) process.exit(0);
   server.close(() => {
     Promise.resolve(scheduler?.stop())
       .then(() => scrapeWorker?.close())

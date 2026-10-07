@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
+import { captureError } from "../services/errorLog";
+import { requireRole } from "../middleware/auth";
 import { orgIdOf } from "../utils/http";
 
 /**
@@ -13,6 +15,7 @@ import { orgIdOf } from "../utils/http";
  */
 
 const router = Router();
+const canEditStock = requireRole("owner", "inventory_manager");
 
 const isWholeNonNeg = (v: unknown): v is number =>
   typeof v === "number" && Number.isInteger(v) && v >= 0;
@@ -78,7 +81,7 @@ router.get("/levels", async (req: Request, res: Response) => {
       })),
     );
   } catch (err) {
-    console.error("GET /inventory/levels failed", err);
+    captureError(req, err, "GET /inventory/levels failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -95,7 +98,7 @@ router.get("/locations", async (req: Request, res: Response) => {
     );
     return res.json(rows);
   } catch (err) {
-    console.error("GET /inventory/locations failed", err);
+    captureError(req, err, "GET /inventory/locations failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -139,15 +142,17 @@ router.get("/skus/:skuId", async (req: Request, res: Response) => {
     );
 
     const { rows: movements } = await pool.query(
-      `SELECT id,
-              created_at AS at,
+      `SELECT im.id,
+              im.created_at AS at,
               l.name AS location,
-              delta,
-              reason,
-              'system' AS actor
+              im.change_quantity AS delta,
+              im.reason_code AS reason,
+              COALESCE(u.full_name, 'system') AS actor
          FROM inventory_movements im
-         JOIN locations l ON l.id = im.location_id
-        WHERE im.product_variant_id = $1
+         JOIN inventory_levels il ON il.id = im.inventory_level_id
+         JOIN locations l ON l.id = il.location_id
+         LEFT JOIN users u ON u.id = im.actor_user_id
+        WHERE il.product_variant_id = $1
         ORDER BY im.created_at DESC
         LIMIT 50`,
       [req.params.skuId],
@@ -155,13 +160,13 @@ router.get("/skus/:skuId", async (req: Request, res: Response) => {
 
     return res.json({ id: variant.id, sku: variant.sku, name: variant.name, locations, movements });
   } catch (err) {
-    console.error("GET /inventory/skus/:skuId failed", err);
+    captureError(req, err, "GET /inventory/skus/:skuId failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
 
 /** PATCH /api/inventory/levels/:id */
-router.patch("/levels/:id", async (req: Request, res: Response) => {
+router.patch("/levels/:id", canEditStock, async (req: Request, res: Response) => {
   let orgId: string;
   try { orgId = orgIdOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
 
@@ -186,7 +191,7 @@ router.patch("/levels/:id", async (req: Request, res: Response) => {
     if (rows.length === 0) return res.status(404).json({ error: "Inventory level not found" });
     return res.json(rows[0]);
   } catch (err) {
-    console.error("PATCH /inventory/levels/:id failed", err);
+    captureError(req, err, "PATCH /inventory/levels/:id failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });

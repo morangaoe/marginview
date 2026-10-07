@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import type { PoolClient } from "pg";
 import { randomUUID } from "crypto";
 import { pool } from "../db/pool";
+import { captureError } from "../services/errorLog";
 import { requireRole } from "../middleware/auth";
 
 const router = Router();
@@ -248,7 +249,7 @@ router.get("/", async (req: Request, res: Response) => {
     const { rows } = await pool.query(LIST_SQL, [orgId]);
     return res.json(rows.map((r: any) => ({ ...r, cost_cents: Number(r.cost_cents) })));
   } catch (err) {
-    console.error("GET /products failed", err);
+    captureError(req, err, "GET /products failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -281,7 +282,7 @@ router.post("/", canWrite, async (req: Request, res: Response) => {
     return res.status(201).json(ids);
   } catch (err) {
     await client.query("ROLLBACK").catch(() => undefined);
-    console.error("POST /products failed", err);
+    captureError(req, err, "POST /products failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();
@@ -378,7 +379,7 @@ router.post("/bulk", canWrite, async (req: Request, res: Response) => {
     });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => undefined);
-    console.error("POST /products/bulk failed", err);
+    captureError(req, err, "POST /products/bulk failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();
@@ -467,7 +468,7 @@ router.patch("/:variantId", canWrite, async (req: Request, res: Response) => {
     return res.json({ variant_id: req.params.variantId, product_id: found.rows[0].product_id });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => undefined);
-    console.error("PATCH /products/:variantId failed", err);
+    captureError(req, err, "PATCH /products/:variantId failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();
@@ -518,7 +519,7 @@ router.delete("/:variantId", canWrite, async (req: Request, res: Response) => {
     return res.status(204).send();
   } catch (err) {
     await client.query("ROLLBACK").catch(() => undefined);
-    console.error("DELETE /products/:variantId failed", err);
+    captureError(req, err, "DELETE /products/:variantId failed");
     return res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();

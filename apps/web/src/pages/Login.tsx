@@ -84,9 +84,9 @@ export function Login() {
         </form>
 
         <div style={{ textAlign: "center", marginTop: 20, fontSize: 13, color: "var(--slate)" }}>
-          Don't have an account?{" "}
-          <Link to="/signup" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
-            Create one
+          Need access? Ask your workspace owner, or{" "}
+          <Link to="/contact" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+            contact us
           </Link>
         </div>
       </div>

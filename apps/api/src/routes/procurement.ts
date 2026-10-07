@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { pool, query } from "../db/pool";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireRole } from "../middleware/auth";
 import { getRecommendations } from "../services/procurementAdvisor";
 
 export const procurementRouter = Router();
 procurementRouter.use(requireAuth);
+const canOrder = requireRole("owner", "inventory_manager");
 
 // NEW: stock + sales speed + competitor prices -> RESTOCK / OPPORTUNITY / HOLD / LIQUIDATE
 procurementRouter.get("/recommendations", async (req, res) => {
@@ -45,7 +46,7 @@ const createPoSchema = z.object({
 // Creates a draft PO, pre-filled from a suggestion when one is provided,
 // per App Flow 3.3. Nothing here marks stock as incoming until the PO is
 // actually sent; that transition is a separate status update.
-procurementRouter.post("/purchase-orders", async (req, res) => {
+procurementRouter.post("/purchase-orders", canOrder, async (req, res) => {
   const parsed = createPoSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { suggestionId, supplierId, locationId, items } = parsed.data;
@@ -105,7 +106,7 @@ const statusSchema = z.object({
   status: z.enum(["draft", "sent", "partially_received", "received", "closed"]),
 });
 
-procurementRouter.patch("/purchase-orders/:id/status", async (req, res) => {
+procurementRouter.patch("/purchase-orders/:id/status", canOrder, async (req, res) => {
   const parsed = statusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const r = await pool.query(

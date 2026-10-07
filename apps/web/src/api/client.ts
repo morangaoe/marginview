@@ -10,6 +10,8 @@
  * instead of a readable string. This version unwraps the error intelligently.
  */
 
+import { noteResponseStatus } from "../auth/session";
+
 const API_ORIGIN = import.meta.env.VITE_API_URL ?? "";
 const BASE = `${API_ORIGIN}/api`;
 
@@ -27,6 +29,7 @@ function authHeaders(): Record<string, string> {
  * human-readable string the UI can display directly.
  */
 async function handle<T>(res: Response): Promise<T> {
+  noteResponseStatus(res.status);
   if (res.status === 204) return undefined as T;
 
   if (res.ok) return res.json();

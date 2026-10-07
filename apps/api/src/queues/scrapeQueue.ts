@@ -11,6 +11,7 @@ import { activateTrialIfNeeded } from "../services/billing";
 import { validateSnapshot } from "../services/scraping/validateSnapshot";
 import { checkComplianceDetailed } from "../services/scraping/complianceCheck";
 import { logger, redactUrl } from "../utils/log";
+import { recordEvent } from "../services/errorLog";
 
 const log = logger("scrape");
 
@@ -194,6 +195,13 @@ async function recordFinalFailure(
   const row = r.rows[0];
   log.error("source failed after all attempts", {
     source: sourceId, run: jobRunId, consecutiveFailures: row?.consecutive_failures, paused: row?.paused, blocked, reason: msg,
+  });
+  await recordEvent({
+    source: "scraper",
+    level: "warn",
+    message: `Scrape failed: ${msg}`,
+    organizationId,
+    context: { sourceId, jobRunId, consecutiveFailures: row?.consecutive_failures, paused: row?.paused, blocked },
   });
   if (row?.paused && (row.consecutive_failures >= AUTO_PAUSE_AFTER || blocked)) {
     await pool.query(

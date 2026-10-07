@@ -4,6 +4,7 @@
  */
 import type { Pool } from "pg";
 import { enqueueDueSources } from "../../queues/scrapeQueue";
+import { recordEvent } from "../errorLog";
 
 const TICK_MS = 60_000;
 const PRUNE_EVERY_MS = 24 * 60 * 60 * 1000;
@@ -29,6 +30,7 @@ export async function pruneSnapshots(pool: Pool): Promise<number> {
   await pool.query(
     "delete from scraping_job_runs where created_at < now() - interval '90 days' and status in ('succeeded','failed')",
   );
+  await pool.query("delete from error_events where created_at < now() - interval '90 days'");
   return rowCount ?? 0;
 }
 
@@ -60,6 +62,7 @@ export function startScrapingScheduler(pool: Pool): SchedulerHandle {
         }
       } catch (err) {
         console.error("[scraper] scheduler tick failed:", err);
+        void recordEvent({ source: "worker", message: `Scheduler tick failed: ${(err as Error).message}`, stack: (err as Error).stack });
       } finally {
         if (locked) await client.query("select pg_advisory_unlock(hashtext($1))", [LOCK_KEY]).catch(() => undefined);
         client.release();

@@ -204,7 +204,9 @@ scrapingRouter.post(
       const jobId = await enqueueScrape(req.user!.organizationId, req.params.id);
       res.status(202).json({ jobId });
     } catch (err: any) {
-      res.status(err?.status ?? 500).json({ error: err?.message ?? "Could not queue scrape" });
+      // Known failures carry a status and a user-facing message; anything else goes to the error handler.
+      if (!err?.status) throw err;
+      res.status(err.status).json({ error: err.message });
     }
   }
 );

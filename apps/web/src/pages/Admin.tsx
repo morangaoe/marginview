@@ -2,6 +2,7 @@ import { CSSProperties, FormEvent, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordNotice } from "./PlatformAdmin";
 
 interface Member {
   id: string;
@@ -10,6 +11,7 @@ interface Member {
   role: string;
   status: string;
   created_at: string;
+  last_login_at: string | null;
 }
 
 const ROLE_DESCRIPTIONS: Record<string, string> = {
@@ -41,6 +43,7 @@ export function Admin() {
   const [role, setRole] = useState<Member["role"]>("viewer");
   const [tempPassword, setTempPassword] = useState("");
   const [inviting, setInviting] = useState(false);
+  const [secret, setSecret] = useState<{ email: string; password: string } | null>(null);
 
   function load() {
     api.get<Member[]>("/admin/members").then(setMembers).catch(() => {});
@@ -64,12 +67,13 @@ export function Admin() {
     setInviting(true);
     setError(null);
     try {
-      await api.post("/admin/members", {
+      const res = await api.post<{ email: string; temporaryPassword: string }>("/admin/members", {
         email,
         fullName,
         role,
-        temporaryPassword: tempPassword,
+        ...(tempPassword ? { temporaryPassword: tempPassword } : {}),
       });
+      setSecret({ email: res.email, password: res.temporaryPassword });
       setEmail("");
       setFullName("");
       setRole("viewer");
@@ -93,6 +97,16 @@ export function Admin() {
     }
   }
 
+  async function resetPassword(member: Member) {
+    if (!window.confirm(`Reset the password for ${member.email}? They will be signed out everywhere.`)) return;
+    try {
+      const res = await api.post<{ password: string }>(`/admin/members/${member.id}/reset-password`, {});
+      setSecret({ email: member.email, password: res.password });
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
   async function toggleStatus(member: Member) {
     const newStatus = member.status === "active" ? "disabled" : "active";
     try {
@@ -109,6 +123,7 @@ export function Admin() {
       <h1 style={{ fontSize: 22, margin: "0 0 4px" }}>Team & access</h1>
       {error && <div style={errorStyle}>{error}</div>}
       {success && <div style={successStyle}>{success}</div>}
+      {secret && <PasswordNotice {...secret} onClose={() => setSecret(null)} />}
 
       {/* Role legend */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -148,7 +163,7 @@ export function Admin() {
               <th>Email</th>
               <th>Role</th>
               <th>Status</th>
-              <th>Joined</th>
+              <th>Last sign-in</th>
               <th></th>
             </tr>
           </thead>
@@ -205,21 +220,26 @@ export function Admin() {
                       background: m.status === "active" ? "#EAF3EC" : "#FBEAE7",
                       color: m.status === "active" ? "var(--success)" : "var(--critical)",
                     }}>
-                      {m.status}
+                      {m.status === "invited" ? "pending" : m.status}
                     </span>
                   </td>
                   <td style={{ fontSize: 12, color: "var(--slate)" }}>
-                    {new Date(m.created_at).toLocaleDateString()}
+                    {m.last_login_at ? new Date(m.last_login_at).toLocaleDateString() : "never"}
                   </td>
                   <td>
                     {!isSelf && (
-                      <button
-                        className="btn"
-                        style={{ fontSize: 12 }}
-                        onClick={() => toggleStatus(m)}
-                      >
-                        {m.status === "active" ? "Disable" : "Enable"}
-                      </button>
+                      <span style={{ whiteSpace: "nowrap" }}>
+                        <button className="btn" style={{ fontSize: 12, marginRight: 6 }} onClick={() => resetPassword(m)}>
+                          Reset password
+                        </button>
+                        <button
+                          className="btn"
+                          style={{ fontSize: 12 }}
+                          onClick={() => toggleStatus(m)}
+                        >
+                          {m.status === "active" ? "Disable" : m.status === "invited" ? "Approve" : "Enable"}
+                        </button>
+                      </span>
                     )}
                   </td>
                 </tr>
@@ -233,7 +253,8 @@ export function Admin() {
       <div className="card" style={{ maxWidth: 480 }}>
         <strong style={{ display: "block", marginBottom: 4 }}>Add a team member</strong>
         <p style={{ color: "var(--slate)", fontSize: 12, marginBottom: 16 }}>
-          Give them the temporary password separately. They can change it after signing in.
+          Leave the password blank to generate one. You'll see it once; send it to them privately.
+          They can change it in Settings after signing in.
         </p>
         <form onSubmit={handleInvite}>
           <div style={fieldStyle}>
@@ -254,15 +275,15 @@ export function Admin() {
             </select>
           </div>
           <div style={fieldStyle}>
-            <label style={labelStyle}>Temporary password</label>
+            <label style={labelStyle}>Temporary password (optional)</label>
             <input
-              required
               type="text"
+              autoComplete="new-password"
               minLength={8}
               value={tempPassword}
               onChange={(e) => setTempPassword(e.target.value)}
               style={inputStyle}
-              placeholder="Min 8 characters — share this privately"
+              placeholder="Generate for me"
             />
           </div>
           <button type="submit" className="btn primary" disabled={inviting} style={{ fontSize: 13 }}>

@@ -3,7 +3,8 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { pool } from "../db/pool";
 import { HttpError, wrap } from "../utils/http";
-import { requireAuth, requireRole, signToken } from "../middleware/auth";
+import { publicSignupEnabled, requireAuth, requireRole, signToken, SIGNUP_DISABLED } from "../middleware/auth";
+import { BCRYPT_ROUNDS } from "./auth";
 
 const router = Router();
 
@@ -26,18 +27,20 @@ function toCents(v: unknown): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/onboarding/register   (public)
+// POST /api/onboarding/register   (public, only when ALLOW_PUBLIC_SIGNUP=true)
 // Creates or joins a workspace and returns a JWT.
 // ---------------------------------------------------------------------------
 router.post(
   "/register",
   wrap(async (req, res) => {
+    if (!publicSignupEnabled()) return res.status(403).json(SIGNUP_DISABLED);
     const { email, password, fullName, mode, orgName, inviteCode, acceptTos } = req.body ?? {};
 
     const mail = String(email ?? "").trim().toLowerCase();
     const name = String(fullName ?? "").trim();
     if (!EMAIL_RE.test(mail)) throw new HttpError(400, "Enter a valid email address.");
     if (String(password ?? "").length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
+    if (String(password).length > 200) throw new HttpError(400, "Password is too long.");
     if (!name) throw new HttpError(400, "Enter your full name.");
     if (mode !== "create" && mode !== "join") throw new HttpError(400, "Choose to create or join a workspace.");
     if (mode === "create" && !String(orgName ?? "").trim()) throw new HttpError(400, "Enter a workspace name.");
@@ -45,13 +48,13 @@ router.post(
       throw new HttpError(400, "Accept the Terms and Privacy Policy to continue.");
 
     const domain = mail.split("@")[1];
-    const hash = await bcrypt.hash(String(password), 12);
+    const hash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
     const client = await pool.connect();
 
     try {
       await client.query("begin");
 
-      const dup = await client.query("select 1 from users where email = $1", [mail]);
+      const dup = await client.query("select 1 from users where lower(email) = $1", [mail]);
       if (dup.rowCount) throw new HttpError(409, "An account with this email already exists. Log in instead.");
 
       let organizationId: string;

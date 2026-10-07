@@ -4,6 +4,7 @@ import { useAuth } from "../auth/AuthContext";
 import { usePlanAccess } from "../plan/PlanContext";
 import DataConnectors from "../components/settings/DataConnectors";
 import AiIntegrations from "../components/settings/AiIntegrations";
+import ChangePassword from "../components/settings/ChangePassword";
 
 interface OrgInfo {
   id: string;
@@ -39,7 +40,7 @@ interface ScrapingSource {
   validation_flag: string | null;
 }
 
-type Tab = "org" | "locations" | "suppliers" | "scraping" | "connectors" | "ai";
+type Tab = "org" | "account" | "locations" | "suppliers" | "scraping" | "connectors" | "ai";
 
 function money(cents: number, currency = "USD") {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
@@ -147,6 +148,7 @@ export function Settings() {
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "org", label: "Organization" },
+    { key: "account", label: "Your account" },
     { key: "locations", label: "Locations" },
     ...(can("procurement") ? [{ key: "suppliers" as Tab, label: "Suppliers" }] : []),
     { key: "scraping", label: "Tracked competitors" },
@@ -184,6 +186,8 @@ export function Settings() {
           </button>
         ))}
       </div>
+
+      {tab === "account" && <ChangePassword />}
 
       {/* Org tab */}
       {tab === "org" && (

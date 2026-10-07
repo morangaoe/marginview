@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../db/pool";
+import { captureError } from "../services/errorLog";
 import { adaptWeights, computeStrategy, marginFor, median, type Weights } from "../services/pricingStrategies";
 import { orgIdOf } from "../utils/http";
 
@@ -80,7 +81,7 @@ router.get("/:variantId/context", async (req: Request, res: Response) => {
       } : null,
     });
   } catch (err) {
-    console.error("GET /pricing/:variantId/context failed", err);
+    captureError(req, err, "GET /pricing/:variantId/context failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -215,7 +216,7 @@ router.post("/:variantId/optimized", async (req: Request, res: Response) => {
       margin_percent: marginFor(optimized, costCents),
     });
   } catch (err) {
-    console.error("POST /pricing/:variantId/optimized failed", err);
+    captureError(req, err, "POST /pricing/:variantId/optimized failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -268,7 +269,7 @@ router.get("/:variantId/history", async (req: Request, res: Response) => {
       })),
     });
   } catch (err) {
-    console.error("GET /pricing/:variantId/history failed", err);
+    captureError(req, err, "GET /pricing/:variantId/history failed");
     return res.status(500).json({ error: "Internal server error" });
   }
 });

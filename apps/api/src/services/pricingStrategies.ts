@@ -159,3 +159,43 @@ export const DEFAULT_PARAMETERS: Record<StrategyType, Record<string, number>> = 
   penetration: { belowCompetitorPct: 15 },
   price_skimming: { abovePct: 25 },
 };
+
+export const BLEND_STRATEGIES: WeightKey[] = ["cost_plus", "value_based", "keystone", "dynamic"];
+export const DEFAULT_BLEND_WEIGHTS: Weights = { cost_plus: 10, value_based: 20, keystone: 30, dynamic: 6 };
+
+export interface BlendResult {
+  priceCents: number;
+  marginPct: number;
+  weights: Weights;
+  notes: string[];
+  breakdown: { strategy: WeightKey; weightPct: number; priceCents: number; warning: string | null }[];
+}
+
+/**
+ * The blended ("optimized") price: each strategy's price weighted by adaptWeights.
+ * Parameter defaults match POST /api/pricing/:variantId/optimized.
+ */
+export function computeBlend(
+  unitCostCents: number,
+  competitorPricesCents: number[],
+  opts: { weights?: Weights; targetMarginPct?: number; stockPct?: number | null } = {},
+): BlendResult {
+  const { weights: w, notes } = adaptWeights(
+    opts.weights ?? DEFAULT_BLEND_WEIGHTS,
+    { trusted: competitorPricesCents.length, stockPct: opts.stockPct ?? null },
+  );
+  const parameters: Record<WeightKey, Record<string, number>> = {
+    cost_plus: { targetMarginPct: opts.targetMarginPct ?? 40 },
+    value_based: { perceivedValueCents: Math.round(unitCostCents * 2.6) },
+    keystone: {},
+    dynamic: { positionPct: 0, minMarginPct: 10 },
+  };
+  const breakdown = BLEND_STRATEGIES.map((strategy) => {
+    const r = computeStrategy(strategy, {
+      unitCostCents, competitorPricesCents, currentPriceCents: null, parameters: parameters[strategy],
+    });
+    return { strategy, weightPct: w[strategy], priceCents: r.recommendedPriceCents, warning: r.warning };
+  });
+  const priceCents = Math.round(breakdown.reduce((sum, b) => sum + (b.priceCents * b.weightPct) / 100, 0));
+  return { priceCents, marginPct: marginFor(priceCents, unitCostCents), weights: w, notes, breakdown };
+}

@@ -1,29 +1,44 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { FreeMarketSearch } from "../components/FreeMarketSearch";
 import { Skeleton } from "../components/Skeleton";
 import { StatusPill } from "../components/StatusPill";
+// The demo runs the production pricing engine, so what it shows is what the app computes.
+import { computeBlend, computeStrategy, marginFor, median, type WeightKey } from "../../../api/src/services/pricingStrategies";
 
 const money = (c: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(c / 100);
 
 const PRODUCTS = [
-  { sku: "ESPRESSO-500G", name: "Single-Origin Espresso Blend 500g", cost: 1200, price: 2999, status: "low", onHand: 12, reorder: 20,
-    comps: [["RoasterDirect", 3199, "2h ago", false], ["CoffeeCo", 2749, "45m ago", true], ["BeanMarket", 3099, "1h ago", false]] },
-  { sku: "GRINDER-PRO", name: "Professional Burr Grinder", cost: 8900, price: 19999, status: "healthy", onHand: 45, reorder: 10,
-    comps: [["KitchenDirect", 18999, "3h ago", false], ["ApplianceHub", 21500, "6h ago", false]] },
-  { sku: "FILTER-CONE-V60", name: "V60 Pour-Over Filter Cone", cost: 400, price: 1499, status: "out_of_stock", onHand: 0, reorder: 30,
-    comps: [["BrewSupply", 1299, "1h ago", false], ["CoffeeCo", 1599, "2h ago", false]] },
+  { sku: "ESPRESSO-500G", name: "Single-Origin Espresso Blend 500g", cost: 1200, price: 2999, onHand: 12, reorder: 20,
+    comps: [["RoasterDirect", 3199, "2h ago"], ["CoffeeCo", 2749, "45m ago"], ["BeanMarket", 3099, "1h ago"]] },
+  { sku: "GRINDER-PRO", name: "Professional Burr Grinder", cost: 8900, price: 19999, onHand: 45, reorder: 10,
+    comps: [["KitchenDirect", 18999, "3h ago"], ["ApplianceHub", 21500, "6h ago"]] },
+  { sku: "FILTER-CONE-V60", name: "V60 Pour-Over Filter Cone", cost: 400, price: 1499, onHand: 0, reorder: 30,
+    comps: [["BrewSupply", 1299, "1h ago"], ["CoffeeCo", 1599, "2h ago"]] },
 ] as const;
 
-const STRATEGIES = ["cost_plus", "value_based", "dynamic", "keystone"];
+type Option = WeightKey | "blended";
+const OPTIONS: { key: Option; label: string }[] = [
+  { key: "cost_plus", label: "cost-plus" }, { key: "value_based", label: "value-based" },
+  { key: "dynamic", label: "dynamic" }, { key: "keystone", label: "keystone" }, { key: "blended", label: "blended" },
+];
 
-function suggest(strategy: string, cost: number, comps: readonly (readonly [string, number, string, boolean])[]) {
-  const avg = comps.reduce((s, c) => s + c[1], 0) / comps.length;
-  switch (strategy) {
-    case "keystone": return cost * 2;
-    case "value_based": return Math.round(avg * 1.05);
-    case "dynamic": return Math.round(Math.min(avg * 0.97, cost * 3));
-    default: return Math.round(cost * 2.5);
+const stockStatus = (onHand: number, reorder: number) => (onHand <= 0 ? "out_of_stock" : onHand <= reorder ? "low" : "healthy");
+
+/** Same parameter defaults as POST /api/pricing/:variantId/optimized. */
+function priceFor(option: Option, cost: number, comps: number[]) {
+  if (option === "blended") {
+    const b = computeBlend(cost, comps);
+    return { price: b.priceCents, warning: b.notes[0] ?? null };
   }
+  const parameters = {
+    cost_plus: { targetMarginPct: 40 },
+    value_based: { perceivedValueCents: Math.round(cost * 2.6) },
+    keystone: {},
+    dynamic: { positionPct: 0, minMarginPct: 10 },
+  }[option] as Record<string, number>;
+  const r = computeStrategy(option, { unitCostCents: cost, competitorPricesCents: comps, currentPriceCents: null, parameters });
+  return { price: r.recommendedPriceCents, warning: r.warning };
 }
 
 function DemoVideo() {
@@ -46,7 +61,7 @@ function DemoVideo() {
 
 export function Demo() {
   const [i, setI] = useState(0);
-  const [strategy, setStrategy] = useState("cost_plus");
+  const [option, setOption] = useState<Option>("cost_plus");
   const [busy, setBusy] = useState(false);
   const p = PRODUCTS[i];
 
@@ -54,10 +69,12 @@ export function Demo() {
     setBusy(true);
     const t = setTimeout(() => setBusy(false), 350);
     return () => clearTimeout(t);
-  }, [i, strategy]);
+  }, [i, option]);
 
-  const price = suggest(strategy, p.cost, p.comps);
-  const margin = (((price - p.cost) / price) * 100).toFixed(1);
+  const compPrices = useMemo(() => p.comps.map((c) => c[1]), [p]);
+  const med = median(compPrices)!;
+  const { price, warning } = priceFor(option, p.cost, compPrices);
+  const margin = marginFor(price, p.cost);
 
   return (
     <main className="mv-wrap mv-demo">
@@ -70,7 +87,7 @@ export function Demo() {
             <button key={x.sku} className={`btn ${i === n ? "active" : ""}`} onClick={() => setI(n)}>
               <span className="mono" style={{ fontSize: 12 }}>{x.sku}</span>
               <span style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-                {money(x.price)} {i === n ? null : <StatusPill status={x.status} />}
+                {money(x.price)} {i === n ? null : <StatusPill status={stockStatus(x.onHand, x.reorder)} />}
               </span>
             </button>
           ))}
@@ -85,29 +102,35 @@ export function Demo() {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginBottom: 16 }}>
               <div>
                 <div style={{ fontWeight: 600, fontSize: 16 }}>{p.name}</div>
-                <div className="mono" style={{ color: "var(--slate)", fontSize: 12, marginTop: 2 }}>{p.sku}, cost {money(p.cost)}</div>
+                <div className="mono" style={{ color: "var(--slate)", fontSize: 12, marginTop: 2 }}>
+                  {p.sku}, cost {money(p.cost)}, today {marginFor(p.price, p.cost)}% margin
+                </div>
               </div>
               <div className="mv-stat">{money(p.price)}</div>
             </div>
             <table>
-              <thead><tr><th>Competitor</th><th>Price</th><th>Checked</th><th>Status</th></tr></thead>
+              <thead><tr><th>Competitor</th><th>Price</th><th>Checked</th><th>vs median</th></tr></thead>
               <tbody>
-                {p.comps.map(([n, c, ago, spike]) => (
-                  <tr key={n}>
-                    <td>{n}</td><td className="mono">{money(c)}</td>
-                    <td style={{ color: "var(--slate)", fontSize: 12 }}>{ago}</td>
-                    <td><span className={`pill ${spike ? "warn" : "ok"}`}>{spike ? "Price spike" : "Normal"}</span></td>
-                  </tr>
-                ))}
+                {p.comps.map(([n, c, ago]) => {
+                  const diff = Math.round(((c - med) / med) * 100);
+                  return (
+                    <tr key={n}>
+                      <td>{n}</td><td className="mono">{money(c)}</td>
+                      <td style={{ color: "var(--slate)", fontSize: 12 }}>{ago}</td>
+                      <td><span className={`pill ${Math.abs(diff) >= 10 ? "warn" : "ok"}`}>{diff > 0 ? "+" : ""}{diff}%</span></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            <div style={{ color: "var(--slate)", fontSize: 12, marginTop: 8 }}>Market median {money(med)}</div>
           </div>
 
           <div className="card" style={{ background: "var(--card)" }}>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }}>
-              {STRATEGIES.map((s) => (
-                <button key={s} className={`btn ${strategy === s ? "active" : ""}`} style={{ fontSize: 12 }} onClick={() => setStrategy(s)}>
-                  {s.replace("_", "-")}
+              {OPTIONS.map((o) => (
+                <button key={o.key} className={`btn ${option === o.key ? "active" : ""}`} style={{ fontSize: 12 }} onClick={() => setOption(o.key)}>
+                  {o.label}
                 </button>
               ))}
             </div>
@@ -121,9 +144,21 @@ export function Demo() {
                 {busy ? <Skeleton w={80} h={34} /> : <div className="mv-stat">{margin}%</div>}
               </div>
             </div>
+            {!busy && warning && <div className="pill warn" style={{ marginTop: 14, whiteSpace: "normal" }}>{warning}</div>}
             <div style={{ marginTop: 24 }}><Link to="/signup" className="btn primary">Apply prices in your account</Link></div>
           </div>
         </section>
+      </div>
+
+      <div style={{ display: "grid", gap: 20, marginTop: 40 }}>
+        <FreeMarketSearch />
+        <div className="card" style={{ background: "var(--card)", display: "flex", gap: 16, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 16 }}>Free price audit</div>
+            <div style={{ color: "var(--slate)", fontSize: 13 }}>Upload your product CSV and see which SKUs are under-earning, in seconds.</div>
+          </div>
+          <Link to="/audit" className="btn primary">Audit my prices</Link>
+        </div>
       </div>
     </main>
   );

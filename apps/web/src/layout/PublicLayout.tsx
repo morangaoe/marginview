@@ -22,6 +22,7 @@ export function PublicLayout() {
         <Link to="/" className="mv-logo"><i />Marginview</Link>
         <nav className="mv-nav-links">
           <Link to="/demo" className="txt">Demo</Link>
+          <Link to="/audit" className="txt">Free audit</Link>
           <Link to="/login" className="txt">Sign in</Link>
           <Link to="/signup" className="btn primary" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>Start free trial</Link>
         </nav>

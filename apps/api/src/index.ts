@@ -17,6 +17,7 @@ import onboardingRouter from "./routes/onboarding";
 import pricingRouter from "./routes/pricing";
 import pricingApplyRouter from "./routes/pricingApply";
 import { procurementRouter } from "./routes/procurement";
+import publicRouter from "./routes/public";
 import productsRouter from "./routes/products";
 import searchRouter from "./routes/search";
 import scraperRouter from "./routes/scraper";
@@ -49,6 +50,8 @@ if (!process.env.DATABASE_URL) {
   console.warn("[config] DATABASE_URL is not set. Database queries will fail.");
 }
 
+// Railway/Vercel sit behind one proxy hop; without this req.ip is the proxy and every visitor shares one quota.
+app.set("trust proxy", 1);
 app.use(cors({ origin: allowedOrigins }));
 // Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.
 app.use(express.json({ limit: "5mb" }));
@@ -58,6 +61,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // Public
 app.use("/api/auth", authRouter);
 app.use("/api/onboarding", onboardingRouter);
+app.use("/api/public", publicRouter);
 
 // Protected: these three routers read req.user, so requireAuth must run first.
 app.use("/api/products", requireAuth, productsRouter);

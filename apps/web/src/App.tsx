@@ -6,6 +6,7 @@ import { Admin } from "./pages/Admin";
 import { Billing } from "./pages/Billing";
 import { Dashboard } from "./pages/Dashboard";
 import { Demo } from "./pages/Demo";
+import { FreeAudit } from "./pages/FreeAudit";
 import { Home } from "./pages/Home";
 import Inventory from "./pages/Inventory";
 import { Login } from "./pages/Login";
@@ -37,6 +38,7 @@ export function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<SignUp />} />
         <Route path="/demo" element={<Demo />} />
+        <Route path="/audit" element={<FreeAudit />} />
         <Route path="/terms" element={<Terms />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/contact" element={<Contact />} />

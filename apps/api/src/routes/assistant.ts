@@ -2,6 +2,10 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool, query } from "../db/pool";
 import { requireAuth } from "../middleware/auth";
+import { askAIChat, type ChatTurn } from "../services/gemini";
+import { getOrgTier } from "../services/billing";
+import { APP_GUIDE, ASSISTANT_PERSONA } from "../services/assistantGuide";
+import { HttpError } from "../utils/http";
 
 export const assistantRouter = Router();
 assistantRouter.use(requireAuth);
@@ -10,6 +14,8 @@ const askSchema = z.object({
   question: z.string().trim().min(1).max(1000),
   productVariantId: z.string().uuid().optional(),
   conversationId: z.string().uuid().optional(),
+  /** The app route the user is looking at, e.g. /app/pricing. Used only as context. */
+  page: z.string().max(200).optional(),
 });
 
 const STOP_WORDS = new Set([
@@ -68,11 +74,102 @@ function answerProduct(question: string, product: any, competitors: any[]) {
   return `${product.product_name} (${product.sku}): ${pricing} Stock: ${stock}. ${competitorText}`;
 }
 
+
+function buildWorkspaceContext(opts: {
+  inventory: any[];
+  selected: any[];
+  competitorsByVariant: Map<string, any[]>;
+  page?: string;
+  role: string;
+  tier: string;
+  tierStatus: string;
+}) {
+  const { inventory, selected, competitorsByVariant } = opts;
+  const money = (cents: number | string | null, currency: string) => formatMoney(cents, currency);
+  const marginOf = (p: any) => {
+    const price = p.price_cents === null ? null : Number(p.price_cents);
+    return price && price > 0 ? ((price - Number(p.cost_cents)) / price) * 100 : null;
+  };
+  const line = (p: any) => {
+    const m = marginOf(p);
+    return `${p.product_name} | SKU ${p.sku} | ${p.category} | cost ${money(p.cost_cents, p.currency)} | price ${money(p.price_cents, p.currency)}` +
+      ` | margin ${m === null ? "n/a" : `${m.toFixed(1)}%`} | ${p.quantity} on hand, reorder at ${p.reorder_level} (${stockLabel(p.quantity, p.reorder_level)})`;
+  };
+
+  const out = inventory.filter((p) => p.quantity <= 0);
+  const low = inventory.filter((p) => p.quantity > 0 && p.quantity <= p.reorder_level);
+  const withMargin = inventory.map((p) => ({ p, m: marginOf(p) })).filter((e) => e.m !== null) as { p: any; m: number }[];
+  const avgMargin = withMargin.length ? withMargin.reduce((t, e) => t + e.m, 0) / withMargin.length : null;
+  const lowestMargin = [...withMargin].sort((a, b) => a.m - b.m).slice(0, 5).map((e) => e.p);
+  const unpriced = inventory.filter((p) => p.price_cents === null).length;
+
+  const parts: string[] = [
+    `User role: ${opts.role}. Plan: ${opts.tier} (${opts.tierStatus}). User is currently on page: ${opts.page || "unknown"}.`,
+    `Catalog: ${inventory.length} products${inventory.length >= 500 ? " (list capped at 500)" : ""}; ${out.length} out of stock; ${low.length} low stock; ${unpriced} without a selling price; average margin ${avgMargin === null ? "n/a" : `${avgMargin.toFixed(1)}%`}.`,
+  ];
+  if (out.length) parts.push(`Out of stock:\n${out.slice(0, 10).map(line).join("\n")}`);
+  if (low.length) parts.push(`Low stock:\n${low.slice(0, 10).map(line).join("\n")}`);
+  if (lowestMargin.length) parts.push(`Lowest margins:\n${lowestMargin.map(line).join("\n")}`);
+  if (selected.length) {
+    parts.push(
+      `Products matching the question:\n` +
+        selected.map((p) => {
+          const comps = competitorsByVariant.get(p.variant_id) ?? [];
+          const ctext = comps.length
+            ? comps.map((c) => `${c.competitor_name} ${money(c.price_cents, c.currency)}${c.validation_flag && c.validation_flag !== "ok" ? ` [${c.validation_flag}]` : ""}${c.observed_at ? ` (checked ${new Date(c.observed_at).toISOString().slice(0, 10)})` : ""}`).join("; ")
+            : "none recorded";
+          return `${line(p)}\n   competitor prices: ${ctext}`;
+        }).join("\n"),
+    );
+  }
+  if (inventory.length) {
+    parts.push(`Product list (first 40):\n${inventory.slice(0, 40).map(line).join("\n")}`);
+  } else {
+    parts.push("The workspace has no products yet (Inventory > Add product or Import CSV).");
+  }
+  return parts.join("\n\n");
+}
+
+async function aiAnswer(opts: {
+  orgId: string;
+  conversationId: string;
+  question: string;
+  context: string;
+}): Promise<string> {
+  const prior = await query<{ role: string; content: string }>(
+    `select role, content from (
+       select role, content, created_at from ai_messages
+        where conversation_id = $1 order by created_at desc limit 11
+     ) m order by created_at asc`,
+    [opts.conversationId],
+  );
+  // The current question was already inserted; drop it from history and re-append with context.
+  const history: ChatTurn[] = prior
+    .slice(0, -1)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+  while (history.length && history[0].role !== "user") history.shift();
+
+  const system = `${ASSISTANT_PERSONA}\n\n<APP_GUIDE>\n${APP_GUIDE}\n</APP_GUIDE>`;
+  const final: ChatTurn = {
+    role: "user",
+    content: `<WORKSPACE_DATA>\n${opts.context}\n</WORKSPACE_DATA>\n\nUser question:\n${opts.question}`,
+  };
+  // Merge consecutive same-role turns defensively (the API requires alternation).
+  const turns: ChatTurn[] = [];
+  for (const t of [...history, final]) {
+    const last = turns[turns.length - 1];
+    if (last && last.role === t.role) last.content += `\n\n${t.content}`;
+    else turns.push({ ...t });
+  }
+  return askAIChat(opts.orgId, "assistant", { system, messages: turns });
+}
+
 assistantRouter.post("/ask", async (req, res) => {
   const parsed = askSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { question, productVariantId, conversationId } = parsed.data;
-  const { organizationId, id: userId } = req.user!;
+  const { question, productVariantId, conversationId, page } = parsed.data;
+  const { organizationId, id: userId, role } = req.user!;
 
   const client = await pool.connect();
   try {
@@ -130,30 +227,60 @@ assistantRouter.post("/ask", async (req, res) => {
         : [];
     if (selected.length > 5) selected = selected.slice(0, 5);
 
-    let answer: string;
-    let referencedRecords: Record<string, unknown>;
-    if (selected.length === 1) {
-      const product = selected[0];
-      const competitors = await query(
-        `select distinct on (cp.id) cp.competitor_name, ps.price_cents, ps.currency, ps.validation_flag
+    if (productVariantId && selected.length === 0) {
+      return res.status(404).json({ error: "Product not found in this workspace." });
+    }
+
+    const competitorsByVariant = new Map<string, any[]>();
+    if (selected.length) {
+      const rows = await query(
+        `select distinct on (cp.id) cp.product_variant_id, cp.competitor_name, ps.price_cents, ps.currency,
+                ps.validation_flag, ps.observed_at
            from competitor_products cp
            join scraping_sources ss on ss.id = cp.scraping_source_id
            join price_snapshots ps on ps.competitor_product_id = cp.id
-          where cp.product_variant_id = $1 and ss.organization_id = $2
+          where cp.product_variant_id = any($1::uuid[]) and ss.organization_id = $2
           order by cp.id, ps.observed_at desc`,
-        [product.variant_id, organizationId],
+        [selected.map((p: any) => p.variant_id), organizationId],
       );
-      answer = answerProduct(question, product, competitors);
-      referencedRecords = { variantIds: [product.variant_id], source: "products, inventory, and competitor snapshots" };
+      for (const r of rows as any[]) {
+        const list = competitorsByVariant.get(r.product_variant_id) ?? [];
+        list.push(r);
+        competitorsByVariant.set(r.product_variant_id, list);
+      }
+    }
+
+    // Rule-based answer: used as the fallback when no AI provider is available.
+    let answer: string;
+    let referencedRecords: Record<string, unknown>;
+    if (selected.length === 1) {
+      answer = answerProduct(question, selected[0], competitorsByVariant.get(selected[0].variant_id) ?? []);
+      referencedRecords = { variantIds: [selected[0].variant_id], source: "products, inventory, and competitor snapshots" };
     } else if (selected.length > 1) {
       answer = selected.map((product: any) => `${product.product_name} (${product.sku}): ${product.quantity} on hand, ${stockLabel(product.quantity, product.reorder_level)}.`).join("\n");
       referencedRecords = { variantIds: selected.map((product: any) => product.variant_id), source: "products and inventory" };
-    } else if (productVariantId) {
-      return res.status(404).json({ error: "Product not found in this workspace." });
     } else {
       answer = answerPortfolio(question, inventory);
       referencedRecords = { source: "workspace product and inventory records" };
     }
+
+    let usedAi = false;
+    try {
+      const tierState = await getOrgTier(organizationId).catch(() => ({ tier: "unknown", status: "unknown" }) as any);
+      const context = buildWorkspaceContext({
+        inventory, selected, competitorsByVariant, page, role,
+        tier: tierState.effectiveTier ?? tierState.tier, tierStatus: tierState.status,
+      });
+      answer = await aiAnswer({ orgId: organizationId, conversationId: activeConversationId!, question, context });
+      usedAi = true;
+      referencedRecords = { ...referencedRecords, source: "your workspace data and the Marginview guide" };
+    } catch (err) {
+      // Quota, missing key, or provider outage must not break the assistant: keep the rule-based answer.
+      const reason = err instanceof HttpError ? err.message : "The AI service is unavailable.";
+      referencedRecords = { ...referencedRecords, aiUnavailable: reason };
+      answer = `${answer}\n\n(Smart answers are unavailable right now: ${reason})`;
+    }
+    referencedRecords = { ...referencedRecords, ai: usedAi };
 
     await client.query(
       `insert into ai_messages (conversation_id, role, content, referenced_records) values ($1, 'assistant', $2, $3)`,

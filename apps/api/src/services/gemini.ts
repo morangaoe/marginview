@@ -80,11 +80,7 @@ export async function callClaude<T>(
 export const callGemini = callClaude;
 
 /** Resolves the key, enforces the monthly quota on the platform key, calls, records usage. */
-export async function askAI<T>(
-  orgId: string,
-  kind: string,
-  opts: { system?: string; prompt: string; schema?: object },
-): Promise<T> {
+async function resolveWithQuota(orgId: string): Promise<ResolvedKey> {
   const k = await resolveAI(orgId);
   if (!k) throw new HttpError(503, "AI isn't configured. Add a Claude API key in Settings, or ask your admin.");
 
@@ -104,12 +100,57 @@ export async function askAI<T>(
       throw new HttpError(429, `You've used your ${limit} included AI requests this month. Add your own Claude key in Settings or upgrade.`);
     }
   }
-  const out = await callClaude<T>(k, opts);
-  await query(
+  return k;
+}
+
+function recordUsage(orgId: string, kind: string, source: string, tokensIn: number, tokensOut: number) {
+  return query(
     "insert into ai_usage (organization_id, kind, source, tokens_in, tokens_out) values ($1,$2,$3,$4,$5)",
-    [orgId, kind, k.source, out.tokensIn, out.tokensOut],
+    [orgId, kind, source, tokensIn, tokensOut],
   ).catch(() => undefined); // metering must never fail the request
+}
+
+export async function askAI<T>(
+  orgId: string,
+  kind: string,
+  opts: { system?: string; prompt: string; schema?: object },
+): Promise<T> {
+  const k = await resolveWithQuota(orgId);
+  const out = await callClaude<T>(k, opts);
+  await recordUsage(orgId, kind, k.source, out.tokensIn, out.tokensOut);
   return out.data;
+}
+
+export interface ChatTurn { role: "user" | "assistant"; content: string }
+
+/** Free-text multi-turn chat. Same key resolution, quota, and metering as askAI. */
+export async function askAIChat(
+  orgId: string,
+  kind: string,
+  opts: { system: string; messages: ChatTurn[]; maxTokens?: number },
+): Promise<string> {
+  const k = await resolveWithQuota(orgId);
+  const client = new Anthropic({ apiKey: k.apiKey });
+  let response: Anthropic.Message;
+  try {
+    response = await client.messages.create({
+      model: k.model,
+      max_tokens: opts.maxTokens ?? 1200,
+      system: opts.system,
+      messages: opts.messages,
+    });
+  } catch (err: any) {
+    if (err?.status === 401 || err?.status === 403) throw new HttpError(400, "The Claude API key was rejected. Check the key in Settings.");
+    if (err?.status === 429) throw new HttpError(429, "The AI provider is rate limiting requests. Try again in a minute.");
+    throw new HttpError(502, "The AI service is unreachable. Try again shortly.");
+  }
+  const text = response.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("")
+    .trim();
+  if (!text) throw new HttpError(502, "The AI returned an empty answer.");
+  await recordUsage(orgId, kind, k.source, response.usage?.input_tokens ?? 0, response.usage?.output_tokens ?? 0);
+  return text;
 }
 
 // Keep old name as alias so existing callers work without changes

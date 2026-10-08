@@ -7,6 +7,7 @@ import { checkScrapingSchema, runMigrations } from "./db/migrate";
 import { startScrapeWorker } from "./queues/scrapeQueue";
 import { jwtSecret, requireAuth } from "./middleware/auth";
 import { requireModule } from "./middleware/plan";
+import { apiNoStore, securityHeaders } from "./middleware/securityHeaders";
 import { adminRouter } from "./routes/admin";
 import { assistantRouter } from "./routes/assistant";
 import { authRouter } from "./routes/auth";
@@ -58,7 +59,9 @@ if (!process.env.DATABASE_URL) {
 // Railway/Vercel sit behind one proxy hop; without this req.ip is the proxy and every visitor shares one quota.
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
-app.use(cors({ origin: allowedOrigins }));
+app.use(securityHeaders);
+app.use("/api", apiNoStore);
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 // Stripe webhook needs the raw body for signature checks, so it goes before express.json().
 app.use("/api/billing/webhook", billingWebhookRouter);
 // Bulk CSV import accepts up to 2000 rows, which exceeds Express's 100kb default.

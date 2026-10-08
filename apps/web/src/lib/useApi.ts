@@ -12,23 +12,16 @@ const API_ORIGIN = import.meta.env.VITE_API_URL ?? "";
  * them to a human-readable string in the same way as api/client.ts.
  */
 export async function request<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
-  let token: string | null = null;
-  try {
-    token = localStorage.getItem("mv_token");
-  } catch {
-    /* localStorage may be unavailable */
-  }
-
   const res = await fetch(`${API_ORIGIN}/api${path}`, {
     ...init,
+    credentials: "include", // the session is an httpOnly cookie
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init.headers ?? {}),
     },
   });
 
-  noteResponseStatus(res.status);
+  noteResponseStatus(res.status, path);
   if (res.status === 204) return undefined as T;
   if (res.ok) return res.json() as Promise<T>;
 

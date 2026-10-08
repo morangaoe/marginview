@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { pool } from "../db/pool";
 import { HttpError, wrap } from "../utils/http";
-import { publicSignupEnabled, requireAuth, requireRole, signToken, SIGNUP_DISABLED } from "../middleware/auth";
+import { publicSignupEnabled, requireAuth, requireRole, setSessionCookie, signToken, SIGNUP_DISABLED } from "../middleware/auth";
 import { BCRYPT_ROUNDS } from "./auth";
 
 const router = Router();
@@ -126,8 +126,8 @@ router.post(
       // Same signer as /api/auth/login: one secret, one expiry, one claim shape.
       const token = signToken({ id: userId, organizationId, role: roleName });
 
+      setSessionCookie(res, token);
       return res.status(201).json({
-        token,
         user: { id: userId, email: mail, fullName: name, organizationId, role: roleName },
       });
     } catch (e: any) {

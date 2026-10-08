@@ -20,8 +20,8 @@ export default function ChangePassword() {
     setSaving(true);
     setMsg(null);
     try {
-      const { token } = await api.post<{ token: string }>("/auth/change-password", { currentPassword: current, newPassword: next });
-      login(token);
+      await api.post("/auth/change-password", { currentPassword: current, newPassword: next });
+      await login();
       setCurrent("");
       setNext("");
       setConfirm("");

@@ -22,17 +22,12 @@ export function reportClientError(report: ClientErrorReport): void {
   seen.add(key);
   sent++;
 
-  let token: string | null = null;
-  try {
-    token = localStorage.getItem("mv_token");
-  } catch {
-    /* storage unavailable */
-  }
   try {
     void fetch(`${API_ORIGIN}/api/errors/client`, {
       method: "POST",
       keepalive: true,
-      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...report,
         message: report.message.slice(0, 2000),

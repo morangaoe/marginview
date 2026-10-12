@@ -1,33 +1,71 @@
-# Migrating off Vercel + Railway
+# Going live: Cloudflare Pages + Render + Supabase (all free)
 
-Target: Cloudflare Pages (web) + Hetzner Cloud VPS (API, worker, Redis, Scrapy fetcher; about €4/mo) + Supabase (Postgres). Pages and Supabase are on free tiers.
+- **Supabase**: Postgres. Also holds the scrape job queue and schedules it with `pg_cron`.
+- **Render** (free web service): the API. It sleeps when idle; the cron ping below wakes it every minute, which also keeps it awake all month (a free service gets 750 h, a month is ~744 h).
+- **Cloudflare Pages**: the website, plus a Function that proxies `/api/*` to Render so the session cookie stays same-origin.
 
-The API cannot scale to zero: it runs a BullMQ worker and a 1-minute scrape scheduler in-process.
+No Redis. Jobs are rows in `scraping_job_runs` (migration 014). Scrapy runs inside the API container (`SCRAPY_LOCAL=true`).
 
-## 1. Database: Railway → Supabase
-1. Create a Supabase project. Under Project Settings → Database → Connection string, copy the **Session pooler** string (port 5432). It works over IPv4 and supports `pg_advisory_lock` (the scheduler uses it). Do not use the Transaction pooler (6543).
-2. `pg_dump -Fc --no-owner --no-acl "$RAILWAY_DATABASE_URL" -f mv.dump`
-3. `pg_restore --no-owner --no-acl -d "$SUPABASE_SESSION_URL" mv.dump`
-4. Migration `013_supabase_rls.sql` runs on API start and enables RLS on every public table, so Supabase's auto-generated REST API exposes nothing. The API connects as `postgres` and is unaffected. The app does not use Supabase Auth or the JS client, so no anon/service keys are needed.
-5. Supabase free tier is 500 MB and pauses after a week of inactivity (the scheduler keeps it active). Snapshot pruning (`SNAPSHOT_RETENTION_DAYS`) helps if you get close.
+## 1. Supabase
+1. supabase.com → New project. Save the database password.
+2. Project Settings → Database → Connection string → **Session pooler** (port 5432). Replace `[YOUR-PASSWORD]`. This is `DATABASE_URL`. Not Direct (IPv6 only) and not Transaction (6543; breaks advisory locks).
+3. Optional, to keep local data:
+   ```
+   pg_dump -Fc --no-owner --no-acl postgres://localhost:5432/marginview -f mv.dump
+   pg_restore --no-owner --no-acl -d "<SESSION_POOLER_URL>" mv.dump
+   ```
+   Otherwise the API creates the schema on first start (`AUTO_MIGRATE=true`). Migration 013 enables RLS on every table so Supabase's REST API exposes nothing; the API connects as `postgres` and is unaffected.
+4. Free tier is 500 MB. `SNAPSHOT_RETENTION_DAYS` limits snapshot growth.
 
-## 2. API: Railway → Hetzner VPS
-1. In Hetzner Cloud create a server: Ubuntu 24.04, type **CX22** (x86) or **CAX11** (ARM), add your SSH key. If you attach a Cloud Firewall, allow inbound TCP 22, 80 and 443. Ubuntu on Hetzner has no extra host firewall to configure.
-2. Install Docker: `curl -fsSL https://get.docker.com | sh`
-3. Clone the repo, then `cd deploy` and create `.env`:
-   - `API_HOST=<public-ip-with-dashes>.sslip.io` (free hostname so Caddy can get a Let's Encrypt cert; use your own domain if you have one)
-   - everything in `apps/api/.env.example`, with `DATABASE_URL` = Supabase Session pooler URL, `FRONTEND_URL=https://<project>.pages.dev` (or your custom domain), `APP_URL` same, plus your existing `JWT_SECRET`, Stripe, SerpAPI, etc. (reuse the Railway values; a new `JWT_SECRET` logs everyone out).
-   - Leave `REDIS_URL` and `SCRAPY_URL` out: compose sets them. Optionally set `SCRAPY_TOKEN` (shared secret) and `SCRAPY_PROXY` (upstream proxy for sites that block the VM's IP).
-4. `docker compose up -d --build`, then `curl https://$API_HOST/health`.
-5. The `scrapy` container (`apps/scrapy`) is a fetch tier used after a plain fetch and before paid providers (ZenRows/Bright Data). It does not run JavaScript, so JS-rendered sites still fall through to the paid tiers. Check it with `docker compose exec scrapy python -c "import urllib.request as u;print(u.urlopen('http://localhost:8000/health').read())"`.
+## 2. Render (API)
+1. render.com → New → Blueprint → pick this repo (it reads `render.yaml`), or New → Web Service → Docker with Dockerfile path `apps/api/Dockerfile`, context `.`, plan Free.
+2. Set environment variables:
+   - `DATABASE_URL` = Supabase Session pooler URL
+   - `JWT_SECRET` = `openssl rand -base64 48`
+   - `CRON_SECRET` = `openssl rand -hex 32` (used again in step 4)
+   - `FRONTEND_URL` and `APP_URL` = your Pages URL (`https://<project>.pages.dev` or custom domain)
+   - `PLATFORM_ADMIN_EMAILS` = your email
+   - plus whichever you use: `SCRAPING_API_KEY`, `SERPAPI_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_CLIENT_ID`, `SENDGRID_API_KEY`, `MAIL_FROM`
+3. Deploy, then open `https://<service>.onrender.com/health` (should return `{"ok":true}`). Note the URL.
 
-## 3. Web: Vercel → Cloudflare Pages
-1. Pages → Create project → connect the repo. Build command `npm run build`, output dir `apps/web/dist`, root directory = repo root.
-2. Add variable `API_ORIGIN=https://<API_HOST>` (read by `apps/web/functions/api/[[path]].ts`, which proxies `/api/*`). Leave `VITE_API_URL` unset.
-3. Headers and the SPA fallback come from `apps/web/public/_headers` and `_redirects`.
+## 3. Cloudflare Pages (website)
+1. Workers & Pages → Create → Pages → Connect to Git → this repo.
+2. Framework: None. Root directory: empty. Build command: `npm run build`. Output directory: `apps/web/dist`.
+3. Settings → Variables and Secrets: `API_ORIGIN=https://<service>.onrender.com`. Leave `VITE_API_URL` unset.
+4. Deploy. Put the resulting Pages URL into `FRONTEND_URL` / `APP_URL` on Render if you used a placeholder.
 
-## 4. Cut over
-- Google sign-in: add the new web origin to Authorized JavaScript origins.
-- Stripe: update the webhook URL to `https://<web-origin>/api/billing/webhook`.
-- SendGrid / magic links use `APP_URL`, so check it points at the new origin.
-- Keep Railway/Vercel running until login, a scrape ("Check now"), and a Stripe test event all work, then delete them (including `vercel.json` files).
+## 4. Supabase cron (runs the scraper)
+SQL Editor → run, with your Render URL and the same `CRON_SECRET`:
+```sql
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+select cron.schedule(
+  'marginview-tick',
+  '* * * * *',
+  $$ select net.http_post(
+       url := 'https://<service>.onrender.com/internal/tick',
+       headers := '{"Authorization": "Bearer <CRON_SECRET>"}'::jsonb,
+       timeout_milliseconds := 60000
+     ) $$
+);
+```
+Each call wakes Render if it is asleep (about 30 s cold start), queues due sources and works the queue. Check it with `select * from cron.job_run_details order by start_time desc limit 5;`. Stop it with `select cron.unschedule('marginview-tick');`.
+
+## 5. External services
+- **Stripe**: webhook URL `https://<pages-origin>/api/billing/webhook`; events `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.paid`, `invoice.payment_failed`; signing secret → `STRIPE_WEBHOOK_SECRET`.
+- **Google sign-in**: add `https://<pages-origin>` under Authorized JavaScript origins.
+- **SendGrid**: `MAIL_FROM` must be a verified sender; links use `APP_URL`.
+
+## 6. Check it
+1. Sign in on the Pages URL with an email in `PLATFORM_ADMIN_EMAILS` (public sign-up is off; add other people from the app).
+2. Add a competitor URL and press **Check now**; the run moves queued → running → succeeded.
+3. Supabase → Table Editor: tables exist, each marked RLS enabled.
+
+## Limits of the free setup
+- Render free has 512 MB RAM: keep `SCRAPE_CONCURRENCY` at 2.
+- First request after a deploy or a restart takes ~30 s; the minute ping prevents sleeping otherwise.
+- Scrapy does not run JavaScript. JS-rendered or bot-protected sites fall through to paid providers if you set `SCRAPING_API_KEY` / `BRIGHTDATA_WS_ENDPOINT`.
+
+## Self-hosting instead (any VPS)
+`deploy/docker-compose.yml` runs the API plus Caddy (HTTPS) with the same image. Set `API_HOST=<ip-with-dashes>.sslip.io` and the API variables in `deploy/.env`, then `docker compose up -d --build`. The API polls its own queue every 5 s, so the cron job is optional there.

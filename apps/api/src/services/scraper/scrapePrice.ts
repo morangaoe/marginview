@@ -6,9 +6,12 @@
  */
 import { extractPrice, type ExtractOptions, type ExtractedPrice } from "./priceExtractor";
 import { fetchHtmlViaBrowser } from "./brightDataClient";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { logger } from "../../utils/log";
 
 const log = logger("fetch");
+const execFileAsync = promisify(execFile);
 
 export type ScrapeMethod = "direct" | "scrapy" | "api_basic" | "api_rendered" | "api_premium" | "bright_data_browser";
 export interface ScrapeResult extends ExtractedPrice {
@@ -50,8 +53,25 @@ async function fetchDirect(url: string, signal?: AbortSignal): Promise<string> {
   return res.text();
 }
 
+/**
+ * SCRAPY_LOCAL=true runs apps/scrapy/fetch_spider.py as a child process (single-container hosts such as Render).
+ * Otherwise SCRAPY_URL points at the HTTP service in apps/scrapy/server.py.
+ */
+async function fetchViaScrapyLocal(url: string, signal?: AbortSignal): Promise<string> {
+  const script = process.env.SCRAPY_SCRIPT ?? "/app/apps/scrapy/fetch_spider.py";
+  const { stdout } = await execFileAsync("python3", [script, url], {
+    timeout: 40_000,
+    maxBuffer: 8 * 1024 * 1024,
+    signal,
+  });
+  const body = JSON.parse(stdout.trim().split("\n").pop() ?? "{}") as { status?: number; html?: string };
+  if (body.status !== 200) throw new HttpStatusError(body.status ?? 0, "scrapy");
+  return body.html ?? "";
+}
+
 /** Fetch through the Scrapy sidecar (apps/scrapy). It reports the target's status so 403/429 still mark the scrape as blocked. */
 async function fetchViaScrapy(url: string, signal?: AbortSignal): Promise<string> {
+  if (process.env.SCRAPY_LOCAL === "true") return fetchViaScrapyLocal(url, signal);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (process.env.SCRAPY_TOKEN) headers.Authorization = `Bearer ${process.env.SCRAPY_TOKEN}`;
   const res = await fetch(`${process.env.SCRAPY_URL!.replace(/\/$/, "")}/fetch`, {
@@ -100,7 +120,7 @@ interface Tier {
 
 export async function scrapePrice(url: string, opts: ScrapeOptions = {}): Promise<ScrapeResult> {
   const { signal, ...extract } = opts;
-  const hasScrapy = !!process.env.SCRAPY_URL?.trim();
+  const hasScrapy = process.env.SCRAPY_LOCAL === "true" || !!process.env.SCRAPY_URL?.trim();
   const hasProvider = !!process.env.SCRAPING_API_KEY;
   const hasBrightData = !!process.env.BRIGHTDATA_WS_ENDPOINT;
   let blocked = false;

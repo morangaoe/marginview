@@ -34,42 +34,49 @@ export async function pruneSnapshots(pool: Pool): Promise<number> {
   return rowCount ?? 0;
 }
 
+let lastPrune = 0;
+
+/**
+ * One scheduler pass: queue every due source, then prune old data about once a day.
+ * The advisory lock keeps overlapping callers (timer + cron endpoint, or two instances) from double-queuing.
+ * Returns how many sources were queued, or null if another caller held the lock.
+ */
+export async function runSchedulerTick(pool: Pool): Promise<number | null> {
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const { rows } = await client.query<{ ok: boolean }>("select pg_try_advisory_lock(hashtext($1)) as ok", [LOCK_KEY]);
+    locked = rows[0]?.ok === true;
+    if (!locked) return null;
+
+    const queued = await enqueueDueSources();
+    if (queued) console.log(`[scraper] queued ${queued} due source(s)`);
+
+    if (Date.now() - lastPrune > PRUNE_EVERY_MS) {
+      lastPrune = Date.now();
+      const removed = await pruneSnapshots(pool);
+      if (removed) console.log(`[scraper] pruned ${removed} old snapshot(s)`);
+    }
+    return queued;
+  } catch (err) {
+    console.error("[scraper] scheduler tick failed:", err);
+    void recordEvent({ source: "worker", message: `Scheduler tick failed: ${(err as Error).message}`, stack: (err as Error).stack });
+    return null;
+  } finally {
+    if (locked) await client.query("select pg_advisory_unlock(hashtext($1))", [LOCK_KEY]).catch(() => undefined);
+    client.release();
+  }
+}
+
 export function startScrapingScheduler(pool: Pool): SchedulerHandle {
   let stopped = false;
-  let lastPrune = 0;
-  let inFlight: Promise<void> | null = null;
+  let inFlight: Promise<unknown> | null = null;
 
   const tick = async () => {
     if (stopped || inFlight) return;
-    inFlight = (async () => {
-      const client = await pool.connect();
-      let locked = false;
-      try {
-        const { rows } = await client.query<{ ok: boolean }>(
-          "select pg_try_advisory_lock(hashtext($1)) as ok",
-          [LOCK_KEY],
-        );
-        locked = rows[0]?.ok === true;
-        if (!locked) return;
-
-        const queued = await enqueueDueSources();
-        if (queued) console.log(`[scraper] queued ${queued} due source(s)`);
-
-        if (Date.now() - lastPrune > PRUNE_EVERY_MS) {
-          lastPrune = Date.now();
-          const removed = await pruneSnapshots(pool);
-          if (removed) console.log(`[scraper] pruned ${removed} old snapshot(s)`);
-        }
-      } catch (err) {
-        console.error("[scraper] scheduler tick failed:", err);
-        void recordEvent({ source: "worker", message: `Scheduler tick failed: ${(err as Error).message}`, stack: (err as Error).stack });
-      } finally {
-        if (locked) await client.query("select pg_advisory_unlock(hashtext($1))", [LOCK_KEY]).catch(() => undefined);
-        client.release();
-        inFlight = null;
-      }
-    })();
+    inFlight = runSchedulerTick(pool);
     await inFlight;
+    inFlight = null;
   };
 
   console.log(`[scraper] Scheduler started, checking every ${TICK_MS / 60_000} min`);

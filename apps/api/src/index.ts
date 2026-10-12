@@ -4,7 +4,8 @@ import "dotenv/config";
 import express from "express";
 import { pool } from "./db/pool";
 import { checkScrapingSchema, runMigrations } from "./db/migrate";
-import { startScrapeWorker } from "./queues/scrapeQueue";
+import { drainQueue, startScrapeWorker } from "./queues/scrapeQueue";
+import crypto from "node:crypto";
 import { jwtSecret, requireAuth } from "./middleware/auth";
 import { requireModule } from "./middleware/plan";
 import { apiNoStore, securityHeaders } from "./middleware/securityHeaders";
@@ -29,7 +30,7 @@ import { aiRouter } from "./routes/ai";
 import { dashboardRouter } from "./routes/dashboard";
 import { errorsRouter } from "./routes/errors";
 import { platformRouter } from "./routes/platform";
-import { startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
+import { runSchedulerTick, startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
 import { errorCapture, recordEvent } from "./services/errorLog";
 import { HttpError } from "./utils/http";
 
@@ -70,6 +71,20 @@ app.use(express.json({ limit: "5mb" }));
 app.use(errorCapture);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Cron wake-up. Supabase pg_cron calls this every minute (see docs/MIGRATION.md): it wakes a sleeping
+// free-tier host, queues due sources and works the queue. Returns right away; work continues in the background.
+app.post("/internal/tick", (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return res.status(404).json({ error: "Not found" });
+  const given = Buffer.from(String(req.headers.authorization ?? ""));
+  const want = Buffer.from(`Bearer ${secret}`);
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  void runSchedulerTick(pool).then(() => drainQueue());
+  res.status(202).json({ ok: true });
+});
 
 // Public
 app.use("/api/auth", authRouter);
@@ -163,7 +178,7 @@ const shutdown = (signal: string) => {
   if (!server) process.exit(0);
   server.close(() => {
     Promise.resolve(scheduler?.stop())
-      .then(() => scrapeWorker?.close())
+      .then(() => scrapeWorker.stop())
       .catch(() => undefined)
       .then(() => pool.end())
       .finally(() => process.exit(0));

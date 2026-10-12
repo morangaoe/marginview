@@ -1,24 +1,24 @@
 /**
- * The single scraping pipeline. Everything that fetches a price goes through here:
+ * The single scraping pipeline, queued in Postgres (scraping_job_runs) so no Redis is needed. Everything that fetches a price goes through here:
  *   - the scheduler (enqueueDueSources), every minute
  *   - "Check now" (enqueueScrape), manual=true so paused sources still run
  */
-import { Queue, Worker, type Job } from "bullmq";
-import IORedis from "ioredis";
 import { pool } from "../db/pool";
 import { scrapePrice, ScrapeError } from "../services/scraper/scrapePrice";
 import { activateTrialIfNeeded } from "../services/billing";
 import { validateSnapshot } from "../services/scraping/validateSnapshot";
 import { checkComplianceDetailed } from "../services/scraping/complianceCheck";
-import { logger, redactUrl } from "../utils/log";
+import { logger } from "../utils/log";
 import { recordEvent } from "../services/errorLog";
 
 const log = logger("scrape");
 
 const ENFORCE_CREDITS = process.env.ENFORCE_SCRAPING_CREDITS === "true";
-const QUEUE = "scrape";
 const ATTEMPTS = 3;
 const JOB_TIMEOUT_MS = 90_000;
+const RETRY_BASE_MS = 15_000;
+/** A run still "running" after this long belonged to a worker that died (deploy, sleep, crash). */
+const STALE_RUNNING_MIN = 5;
 const AUTO_PAUSE_AFTER = 5;
 const BASE_BACKOFF_MIN = 15;
 const MAX_BACKOFF_MIN = 24 * 60;
@@ -40,61 +40,12 @@ interface SourceRow {
   selector: string | null;
 }
 
-function makeRedisConnection(): IORedis | null {
-  const url = process.env.REDIS_URL?.trim();
-  if (!url) {
-    log.error("REDIS_URL is not set. No competitor prices will be fetched: the scheduler and 'Check now' both need the queue.");
-    return null;
-  }
-  const safe = redactUrl(url);
-  const conn = new IORedis(url, {
-    maxRetriesPerRequest: null,
-    // Never give up. Returning null here used to kill the connection for good
-    // after ~1 minute of Redis downtime, silently stopping all scraping.
-    retryStrategy: (times) => Math.min(times * 1000, 30_000),
-    enableReadyCheck: false,
-    // Resolve both IPv4 and IPv6 (Railway's private network is IPv6-only).
-    family: 0,
-  });
-  let lastError = "";
-  conn.on("ready", () => {
-    lastError = "";
-    log.info("redis connected", { url: safe });
-  });
-  conn.on("error", (err) => {
-    // ioredis emits the same error on every retry; log each distinct one once.
-    if (err.message === lastError) return;
-    lastError = err.message;
-    log.error("redis error", { url: safe, error: err.message });
-  });
-  conn.on("reconnecting", (ms: number) => log.debug("redis reconnecting", { inMs: ms }));
-  return conn;
-}
-
-const connection = makeRedisConnection();
-export const scrapeQueue = connection ? new Queue<ScrapeJobData>(QUEUE, { connection }) : null;
-
 async function queueRun(organizationId: string, sourceId: string, manual: boolean): Promise<string> {
-  if (!scrapeQueue) {
-    throw Object.assign(new Error("Background scraping isn't configured yet (REDIS_URL is not set)."), { status: 503 });
-  }
   const run = await pool.query(
-    "insert into scraping_job_runs (scraping_source_id, organization_id, status) values ($1, $2, 'queued') returning id",
-    [sourceId, organizationId],
+    "insert into scraping_job_runs (scraping_source_id, organization_id, status, manual) values ($1, $2, 'queued', $3) returning id",
+    [sourceId, organizationId, manual],
   );
-  const jobRunId: string = run.rows[0].id;
-  await scrapeQueue.add(
-    "scrape",
-    { jobRunId, sourceId, organizationId, manual },
-    {
-      jobId: jobRunId,
-      attempts: ATTEMPTS,
-      backoff: { type: "exponential", delay: 15_000 },
-      removeOnComplete: 1000,
-      removeOnFail: 1000,
-    },
-  );
-  return jobRunId;
+  return run.rows[0].id as string;
 }
 
 /** "Check now" from the UI. Works on paused sources too, since the person asked for it. */
@@ -110,17 +61,13 @@ export async function enqueueScrape(organizationId: string, sourceId: string): P
       status: 409,
     });
   }
-  return queueRun(organizationId, sourceId, true);
+  const id = await queueRun(organizationId, sourceId, true);
+  kickWorker();
+  return id;
 }
 
 /** Called by the scheduler. Returns how many sources were queued. */
-let warnedNoQueue = false;
 export async function enqueueDueSources(limit = 200, organizationId?: string): Promise<number> {
-  if (!scrapeQueue) {
-    if (!warnedNoQueue) log.warn("scheduler tick skipped: queue disabled because REDIS_URL is not set");
-    warnedNoQueue = true;
-    return 0;
-  }
   const { rows } = await pool.query<{ id: string; organization_id: string }>(
     `select ss.id, ss.organization_id
        from scraping_sources ss
@@ -146,6 +93,7 @@ export async function enqueueDueSources(limit = 200, organizationId?: string): P
       log.error("could not queue source", { source: r.id, error: (e as Error).message });
     }
   }
+  if (queued) kickWorker();
   return queued;
 }
 
@@ -212,24 +160,69 @@ async function recordFinalFailure(
   }
 }
 
-async function processJob(job: Job<ScrapeJobData>) {
-  const { jobRunId, sourceId, organizationId, manual } = job.data;
-  const attempt = job.attemptsMade + 1;
-  const isFinalAttempt = attempt >= (job.opts.attempts ?? 1);
+interface ClaimedJob extends ScrapeJobData {
+  attempt: number;
+}
+
+/** Puts runs left "running" by a dead worker back in the queue (or fails them after the last attempt). */
+async function reclaimStale() {
+  await pool.query(
+    `update scraping_job_runs
+        set status = case when attempts >= $2 then 'failed' else 'queued' end,
+            failure_reason = case when attempts >= $2 then 'Worker stopped before finishing.' else failure_reason end,
+            finished_at = case when attempts >= $2 then now() else finished_at end,
+            run_after = now()
+      where status = 'running' and locked_at < now() - make_interval(mins => $1::int)`,
+    [STALE_RUNNING_MIN, ATTEMPTS],
+  );
+}
+
+/** Atomically takes up to `n` due jobs. SKIP LOCKED lets several workers claim without blocking each other. */
+async function claimJobs(n: number): Promise<ClaimedJob[]> {
+  const { rows } = await pool.query(
+    `update scraping_job_runs
+        set status = 'running', started_at = coalesce(started_at, now()), locked_at = now(), attempts = attempts + 1
+      where id in (
+        select id from scraping_job_runs
+         where status = 'queued' and run_after <= now()
+         order by run_after
+         limit $1
+         for update skip locked)
+  returning id, scraping_source_id, organization_id, manual, attempts`,
+    [n],
+  );
+  return rows.map((r) => ({
+    jobRunId: r.id,
+    sourceId: r.scraping_source_id,
+    organizationId: r.organization_id,
+    manual: r.manual,
+    attempt: r.attempts,
+  }));
+}
+
+async function processJob(job: ClaimedJob) {
+  const { jobRunId, sourceId, organizationId, manual, attempt } = job;
   try {
-    await runJob(job.data, attempt);
+    await runJob(job, attempt);
   } catch (e) {
     const err = e as Error;
-    log.warn("attempt failed", {
-      source: sourceId, run: jobRunId, attempt, of: job.opts.attempts ?? 1, manual: !!manual, error: err.message,
-    });
-    if (isFinalAttempt) {
-      const blocked = e instanceof ScrapeError && e.blocked;
-      await recordFinalFailure(jobRunId, sourceId, organizationId, err.message, blocked).catch((dbErr) =>
-        log.error("could not record failure", { source: sourceId, run: jobRunId, error: (dbErr as Error).message }),
-      );
+    const isFinalAttempt = attempt >= ATTEMPTS;
+    log.warn("attempt failed", { source: sourceId, run: jobRunId, attempt, of: ATTEMPTS, manual: !!manual, error: err.message });
+    try {
+      if (isFinalAttempt) {
+        const blocked = e instanceof ScrapeError && e.blocked;
+        await recordFinalFailure(jobRunId, sourceId, organizationId, err.message, blocked);
+      } else {
+        await pool.query(
+          `update scraping_job_runs
+              set status = 'queued', failure_reason = $2, run_after = now() + make_interval(secs => $3::int / 1000.0)
+            where id = $1`,
+          [jobRunId, err.message.slice(0, 1000), RETRY_BASE_MS * 2 ** (attempt - 1)],
+        );
+      }
+    } catch (dbErr) {
+      log.error("could not record failure", { source: sourceId, run: jobRunId, error: (dbErr as Error).message });
     }
-    throw e;
   }
 }
 
@@ -365,20 +358,51 @@ async function runJob({ jobRunId, sourceId, organizationId, manual }: ScrapeJobD
   await activateTrialIfNeeded(organizationId).catch((e) => log.warn("trial activation failed", { error: (e as Error).message }));
 }
 
-export function startScrapeWorker(): Worker<ScrapeJobData> | null {
-  if (!connection) {
-    log.error("worker disabled: REDIS_URL is not set");
-    return null;
-  }
-  const worker = new Worker<ScrapeJobData>(QUEUE, processJob, {
-    connection,
-    concurrency: Number(process.env.SCRAPE_CONCURRENCY ?? 3),
-  });
-  worker.on("failed", (job, err) =>
-    log.debug("job failed event", { job: job?.id, attemptsMade: job?.attemptsMade, error: err.message }),
-  );
-  worker.on("completed", (job) => log.debug("job completed", { job: job.id }));
-  worker.on("error", (err) => log.error("worker error", { error: err.message }));
-  log.info("worker started", { concurrency: Number(process.env.SCRAPE_CONCURRENCY ?? 3) });
-  return worker;
+const CONCURRENCY = Number(process.env.SCRAPE_CONCURRENCY ?? 3);
+const POLL_MS = 5_000;
+let active = 0;
+let draining: Promise<void> | null = null;
+
+/** Claims and runs jobs until none are due. Safe to call repeatedly; only one drain runs at a time. */
+export function drainQueue(): Promise<void> {
+  if (draining) return draining;
+  draining = (async () => {
+    try {
+      await reclaimStale();
+      for (;;) {
+        const free = CONCURRENCY - active;
+        const jobs = free > 0 ? await claimJobs(free) : [];
+        if (!jobs.length && active === 0) break;
+        for (const job of jobs) {
+          active++;
+          void processJob(job)
+            .catch((e) => log.error("job crashed", { run: job.jobRunId, error: (e as Error).message }))
+            .finally(() => active--);
+        }
+        await new Promise((r) => setTimeout(r, jobs.length ? 200 : 1000));
+      }
+    } catch (e) {
+      log.error("queue drain failed", { error: (e as Error).message });
+    } finally {
+      draining = null;
+    }
+  })();
+  return draining;
+}
+
+/** Start working the queue now (after enqueueing, or when the cron endpoint wakes the service). */
+export function kickWorker() {
+  void drainQueue();
+}
+
+export function startScrapeWorker(): { stop(): Promise<void> } {
+  const timer = setInterval(kickWorker, POLL_MS);
+  kickWorker();
+  log.info("worker started", { concurrency: CONCURRENCY });
+  return {
+    async stop() {
+      clearInterval(timer);
+      await draining?.catch(() => undefined);
+    },
+  };
 }

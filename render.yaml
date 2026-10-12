@@ -1,0 +1,26 @@
+# Render Blueprint: free web service for the API. Fill the sync:false values in the Render dashboard.
+services:
+  - type: web
+    name: marginview-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL        # Supabase Session pooler URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CRON_SECRET         # same value goes into the pg_cron job
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: PLATFORM_ADMIN_EMAILS
+        sync: false
+      - key: ALLOW_PUBLIC_SIGNUP
+        value: "false"
+      - key: SCRAPE_CONCURRENCY  # free tier has 512 MB RAM
+        value: "2"

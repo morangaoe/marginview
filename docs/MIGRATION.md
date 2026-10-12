@@ -1,6 +1,6 @@
 # Migrating off Vercel + Railway
 
-Target: Cloudflare Pages (web) + Oracle Always-Free VM (API, worker, Redis) + Supabase (Postgres). All free.
+Target: Cloudflare Pages (web) + Oracle Always-Free VM (API, worker, Redis, Scrapy fetcher) + Supabase (Postgres). All free.
 
 The API cannot scale to zero: it runs a BullMQ worker and a 1-minute scrape scheduler in-process.
 
@@ -17,8 +17,9 @@ The API cannot scale to zero: it runs a BullMQ worker and a 1-minute scrape sche
 3. Clone the repo, then `cd deploy` and create `.env`:
    - `API_HOST=<public-ip-with-dashes>.sslip.io` (free hostname so Caddy can get a Let's Encrypt cert; use your own domain if you have one)
    - everything in `apps/api/.env.example`, with `DATABASE_URL` = Supabase Session pooler URL, `FRONTEND_URL=https://<project>.pages.dev` (or your custom domain), `APP_URL` same, plus your existing `JWT_SECRET`, Stripe, SerpAPI, etc. (reuse the Railway values; a new `JWT_SECRET` logs everyone out).
-   - Leave `REDIS_URL` out: compose sets it.
+   - Leave `REDIS_URL` and `SCRAPY_URL` out: compose sets them. Optionally set `SCRAPY_TOKEN` (shared secret) and `SCRAPY_PROXY` (upstream proxy for sites that block the VM's IP).
 4. `docker compose up -d --build`, then `curl https://$API_HOST/health`.
+5. The `scrapy` container (`apps/scrapy`) is a fetch tier used after a plain fetch and before paid providers (ZenRows/Bright Data). It does not run JavaScript, so JS-rendered sites still fall through to the paid tiers. Check it with `docker compose exec scrapy python -c "import urllib.request as u;print(u.urlopen('http://localhost:8000/health').read())"`.
 
 ## 3. Web: Vercel → Cloudflare Pages
 1. Pages → Create project → connect the repo. Build command `npm run build`, output dir `apps/web/dist`, root directory = repo root.

@@ -10,7 +10,7 @@ import { logger } from "../../utils/log";
 
 const log = logger("fetch");
 
-export type ScrapeMethod = "direct" | "api_basic" | "api_rendered" | "api_premium" | "bright_data_browser";
+export type ScrapeMethod = "direct" | "scrapy" | "api_basic" | "api_rendered" | "api_premium" | "bright_data_browser";
 export interface ScrapeResult extends ExtractedPrice {
   method: ScrapeMethod;
 }
@@ -50,6 +50,22 @@ async function fetchDirect(url: string, signal?: AbortSignal): Promise<string> {
   return res.text();
 }
 
+/** Fetch through the Scrapy sidecar (apps/scrapy). It reports the target's status so 403/429 still mark the scrape as blocked. */
+async function fetchViaScrapy(url: string, signal?: AbortSignal): Promise<string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (process.env.SCRAPY_TOKEN) headers.Authorization = `Bearer ${process.env.SCRAPY_TOKEN}`;
+  const res = await fetch(`${process.env.SCRAPY_URL!.replace(/\/$/, "")}/fetch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ url }),
+    signal: deadline(45_000, signal),
+  });
+  if (!res.ok) throw new HttpStatusError(res.status, "scrapy service");
+  const body = (await res.json()) as { status: number; html: string };
+  if (body.status !== 200) throw new HttpStatusError(body.status, "scrapy");
+  return body.html;
+}
+
 async function fetchViaProvider(
   url: string,
   opts: { render: boolean; premium: boolean },
@@ -84,12 +100,14 @@ interface Tier {
 
 export async function scrapePrice(url: string, opts: ScrapeOptions = {}): Promise<ScrapeResult> {
   const { signal, ...extract } = opts;
+  const hasScrapy = !!process.env.SCRAPY_URL?.trim();
   const hasProvider = !!process.env.SCRAPING_API_KEY;
   const hasBrightData = !!process.env.BRIGHTDATA_WS_ENDPOINT;
   let blocked = false;
 
   const tiers: Tier[] = [
     { method: "direct", run: () => fetchDirect(url, signal) },
+    { method: "scrapy", run: () => fetchViaScrapy(url, signal), when: () => hasScrapy },
     {
       method: "api_basic",
       run: () => fetchViaProvider(url, { render: false, premium: false }, signal),

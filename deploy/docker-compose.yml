@@ -9,9 +9,16 @@ services:
     environment:
       PORT: 4000
       REDIS_URL: redis://redis:6379
-    depends_on: [redis]
+      SCRAPY_URL: http://scrapy:8000
+    depends_on: [redis, scrapy]
     restart: unless-stopped
     stop_grace_period: 20s
+
+  scrapy:
+    build: ../apps/scrapy
+    environment:
+      SCRAPY_TOKEN: ${SCRAPY_TOKEN:-}
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine

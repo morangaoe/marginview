@@ -10,6 +10,7 @@ import { FreeAudit } from "./pages/FreeAudit";
 import { Home } from "./pages/Home";
 import Inventory from "./pages/Inventory";
 import { Login } from "./pages/Login";
+import { LoginLink } from "./pages/LoginLink";
 import { Privacy } from "./pages/Privacy";
 import Pricing from "./pages/Pricing";
 import { PlatformAdmin } from "./pages/PlatformAdmin";
@@ -37,6 +38,7 @@ export function App() {
       <Route element={<PublicLayout />}>
         <Route path="/" element={<Home />} />
         <Route path="/login" element={<Login />} />
+        <Route path="/login/link" element={<LoginLink />} />
         <Route path="/signup" element={<SignUp />} />
         <Route path="/demo" element={<Demo />} />
         <Route path="/audit" element={<FreeAudit />} />

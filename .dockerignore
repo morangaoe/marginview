@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+.git
+.env
+**/.env
+apps/web
+docs
+marginview_context*

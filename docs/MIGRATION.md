@@ -1,6 +1,6 @@
 # Migrating off Vercel + Railway
 
-Target: Cloudflare Pages (web) + Oracle Always-Free VM (API, worker, Redis, Scrapy fetcher) + Supabase (Postgres). All free.
+Target: Cloudflare Pages (web) + Hetzner Cloud VPS (API, worker, Redis, Scrapy fetcher; about €4/mo) + Supabase (Postgres). Pages and Supabase are on free tiers.
 
 The API cannot scale to zero: it runs a BullMQ worker and a 1-minute scrape scheduler in-process.
 
@@ -11,8 +11,8 @@ The API cannot scale to zero: it runs a BullMQ worker and a 1-minute scrape sche
 4. Migration `013_supabase_rls.sql` runs on API start and enables RLS on every public table, so Supabase's auto-generated REST API exposes nothing. The API connects as `postgres` and is unaffected. The app does not use Supabase Auth or the JS client, so no anon/service keys are needed.
 5. Supabase free tier is 500 MB and pauses after a week of inactivity (the scheduler keeps it active). Snapshot pruning (`SNAPSHOT_RETENTION_DAYS`) helps if you get close.
 
-## 2. API: Railway → Oracle VM
-1. Create an Always-Free **Ampere A1** instance (Ubuntu). In the VCN security list open TCP 80 and 443, and on the VM: `sudo iptables -I INPUT -p tcp -m multiport --dports 80,443 -j ACCEPT` (persist with `netfilter-persistent save`).
+## 2. API: Railway → Hetzner VPS
+1. In Hetzner Cloud create a server: Ubuntu 24.04, type **CX22** (x86) or **CAX11** (ARM), add your SSH key. If you attach a Cloud Firewall, allow inbound TCP 22, 80 and 443. Ubuntu on Hetzner has no extra host firewall to configure.
 2. Install Docker: `curl -fsSL https://get.docker.com | sh`
 3. Clone the repo, then `cd deploy` and create `.env`:
    - `API_HOST=<public-ip-with-dashes>.sslip.io` (free hostname so Caddy can get a Let's Encrypt cert; use your own domain if you have one)

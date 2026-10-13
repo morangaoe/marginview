@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import type { PoolClient } from "pg";
 import { randomUUID } from "crypto";
 import { pool } from "../db/pool";
+import { cleanText } from "../utils/sanitize";
 import { captureError } from "../services/errorLog";
 import { requireRole } from "../middleware/auth";
 
@@ -78,9 +79,9 @@ function validateProduct(p: any): string[] {
 /** Call only after validateProduct passed. Fills defaults. */
 function normalizeProduct(p: any): ProductInput {
   return {
-    sku: p.sku.trim(),
-    name: p.name.trim(),
-    category: (typeof p.category === "string" && p.category.trim()) || "Other",
+    sku: cleanText(p.sku),
+    name: cleanText(p.name),
+    category: (typeof p.category === "string" && cleanText(p.category)) || "Other",
     cost_cents: p.cost_cents,
     price_cents: isMissing(p.price_cents) ? null : p.price_cents,
     currency: typeof p.currency === "string" && /^[A-Za-z]{3}$/.test(p.currency) ? p.currency.toUpperCase() : "USD",

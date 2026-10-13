@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { pool } from "../db/pool";
 import { HttpError, wrap } from "../utils/http";
+import { cleanText } from "../utils/sanitize";
 import { publicSignupEnabled, requireAuth, requireRole, setSessionCookie, signToken, SIGNUP_DISABLED } from "../middleware/auth";
 import { BCRYPT_ROUNDS } from "./auth";
 
@@ -37,13 +38,13 @@ router.post(
     const { email, password, fullName, mode, orgName, inviteCode, acceptTos } = req.body ?? {};
 
     const mail = String(email ?? "").trim().toLowerCase();
-    const name = String(fullName ?? "").trim();
+    const name = cleanText(String(fullName ?? "")).slice(0, 120);
     if (!EMAIL_RE.test(mail)) throw new HttpError(400, "Enter a valid email address.");
     if (String(password ?? "").length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
     if (String(password).length > 200) throw new HttpError(400, "Password is too long.");
     if (!name) throw new HttpError(400, "Enter your full name.");
     if (mode !== "create" && mode !== "join") throw new HttpError(400, "Choose to create or join a workspace.");
-    if (mode === "create" && !String(orgName ?? "").trim()) throw new HttpError(400, "Enter a workspace name.");
+    if (mode === "create" && !cleanText(String(orgName ?? ""))) throw new HttpError(400, "Enter a workspace name.");
     if (mode === "create" && acceptTos !== true)
       throw new HttpError(400, "Accept the Terms and Privacy Policy to continue.");
 
@@ -69,7 +70,7 @@ router.post(
           `insert into organizations (name, domain, invite_code, tos_accepted_at, privacy_policy_version_accepted)
            values ($1, $2, $3, now(), $4) returning id`,
           [
-            String(orgName).trim(),
+            cleanText(String(orgName)).slice(0, 120),
             claimDomain,
             randomBytes(5).toString("hex").toUpperCase(),
             process.env.PRIVACY_POLICY_VERSION ?? "v1",
@@ -274,8 +275,8 @@ router.post(
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i] ?? {};
           const rowNo = i + 2; // +1 header, +1 for 1-based numbering
-          const sku = String(r.sku ?? "").trim();
-          const pname = String(r.name ?? "").trim();
+          const sku = cleanText(String(r.sku ?? "")).slice(0, 100);
+          const pname = cleanText(String(r.name ?? "")).slice(0, 255);
           if (!sku) { skip(rowNo, undefined, "Missing SKU"); continue; }
           if (!pname) { skip(rowNo, sku, "Missing product name"); continue; }
           if (taken.has(sku)) { skip(rowNo, sku, "SKU already exists or repeats in this file"); continue; }
@@ -291,7 +292,7 @@ router.post(
           const quantity = qtyRaw === "" ? 0 : /^\d+$/.test(qtyRaw) ? Number(qtyRaw) : null;
           if (quantity === null) { skip(rowNo, sku, "Quantity must be a whole number"); continue; }
 
-          const category = String(r.category ?? "").trim() || "General";
+          const category = cleanText(String(r.category ?? "")).slice(0, 80) || "General";
 
           const prod = await client.query(
             "insert into products (organization_id, name, category) values ($1, $2, $3) returning id",

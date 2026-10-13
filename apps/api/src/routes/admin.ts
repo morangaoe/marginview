@@ -9,6 +9,7 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
+import { nameField, optionalTextField } from "../utils/sanitize";
 import { pool, query } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { BCRYPT_ROUNDS, generatePassword, passwordSchema, setPassword } from "./auth";
@@ -31,7 +32,7 @@ adminRouter.get("/members", requireRole("owner"), async (req, res) => {
 
 const inviteSchema = z.object({
   email: z.string().email(),
-  fullName: z.string().min(1),
+  fullName: nameField(),
   role: z.enum(["owner", "pricing_manager", "inventory_manager", "viewer"]),
   // Omit to have one generated; either way it is returned once in the response.
   temporaryPassword: passwordSchema.optional(),
@@ -194,8 +195,8 @@ adminRouter.get("/locations", async (req, res) => {
 });
 
 const locationSchema = z.object({
-  name: z.string().min(1),
-  address: z.string().optional(),
+  name: nameField(),
+  address: optionalTextField(300),
 });
 
 adminRouter.post("/locations", requireRole("owner"), async (req, res) => {

@@ -7,6 +7,7 @@ import { clearSessionCookie, publicSignupEnabled, requireAuth, setSessionCookie,
 import { emailConfigured, sendEmail } from "../services/email";
 import { recordEvent } from "../services/errorLog";
 import { createLimiter } from "../utils/rateLimit";
+import { escapeHtml, nameField } from "../utils/sanitize";
 
 export const authRouter = Router();
 
@@ -23,8 +24,8 @@ const perIp = createLimiter({ max: 30, windowMs: WINDOW_MS });
 const TOO_MANY = "Too many sign-in attempts. Wait 15 minutes and try again.";
 
 const signupSchema = z.object({
-  organizationName: z.string().min(1),
-  fullName: z.string().min(1),
+  organizationName: nameField(),
+  fullName: nameField(),
   email: z.string().email(),
   password: passwordSchema,
   tosAccepted: z.literal(true), // App Flow 3.1: acceptance is required, not a pre-checked box
@@ -294,7 +295,7 @@ authRouter.post("/magic/request", async (req, res) => {
         to: email,
         subject: "Your Marginview sign-in link",
         text: `Sign in to Marginview: ${link}\n\nThis link works once and expires in ${LINK_TTL_MIN} minutes. If you didn't ask for it, ignore this email.`,
-        html: `<p>Click to sign in to Marginview:</p><p><a href="${link}">Sign in</a></p><p style="color:#666;font-size:13px">This link works once and expires in ${LINK_TTL_MIN} minutes. If you didn't ask for it, ignore this email.</p>`,
+        html: `<p>Click to sign in to Marginview:</p><p><a href="${escapeHtml(link)}">Sign in</a></p><p style="color:#666;font-size:13px">This link works once and expires in ${LINK_TTL_MIN} minutes. If you didn't ask for it, ignore this email.</p>`,
       });
     } catch (e) {
       void recordEvent({ source: "auth", message: `Sign-in email failed: ${(e as Error).message}`, path: "/api/auth/magic/request", fingerprintKey: "auth|magic_send_failed" });

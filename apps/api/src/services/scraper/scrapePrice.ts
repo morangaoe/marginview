@@ -94,16 +94,34 @@ async function fetchViaProvider(
   const key = process.env.SCRAPING_API_KEY;
   if (!key) throw new Error("SCRAPING_API_KEY is not configured");
   const provider = (process.env.SCRAPING_PROVIDER ?? "zenrows").toLowerCase();
-  const isScrapingBee = provider === "scrapingbee";
 
   // Omit flags that are off so the request is the cheapest mode the provider offers.
-  const params: Record<string, string | undefined> = isScrapingBee
-    ? { api_key: key, url, render_js: opts.render ? "true" : undefined, premium_proxy: opts.premium ? "true" : undefined }
-    : { apikey: key, url, js_render: opts.render ? "true" : undefined, premium_proxy: opts.premium ? "true" : undefined };
+  const flag = (on: boolean) => (on ? "true" : undefined);
+  let base: string;
+  let params: Record<string, string | undefined>;
+  switch (provider) {
+    case "scrapingbee":
+      base = "https://app.scrapingbee.com/api/v1/";
+      params = { api_key: key, url, render_js: flag(opts.render), premium_proxy: flag(opts.premium) };
+      break;
+    case "scraperapi":
+      base = "https://api.scraperapi.com/";
+      params = { api_key: key, url, render: flag(opts.render), premium: flag(opts.premium) };
+      break;
+    case "crawlbase":
+      // Crawlbase has separate tokens: SCRAPING_API_KEY is the normal token, so JS rendering
+      // uses SCRAPING_API_KEY_JS (the JavaScript token) when set and is skipped otherwise.
+      base = "https://api.crawlbase.com/";
+      if (opts.render && !process.env.SCRAPING_API_KEY_JS) throw new Error("crawlbase JS rendering needs SCRAPING_API_KEY_JS");
+      params = { token: opts.render ? process.env.SCRAPING_API_KEY_JS : key, url };
+      break;
+    default:
+      base = "https://api.zenrows.com/v1/";
+      params = { apikey: key, url, js_render: flag(opts.render), premium_proxy: flag(opts.premium) };
+  }
   const qs = new URLSearchParams(
     Object.entries(params).filter((e): e is [string, string] => e[1] !== undefined),
   );
-  const base = isScrapingBee ? "https://app.scrapingbee.com/api/v1/" : "https://api.zenrows.com/v1/";
 
   const res = await fetch(`${base}?${qs}`, { signal: deadline(45_000, signal) });
   if (!res.ok) throw new HttpStatusError(res.status, provider);

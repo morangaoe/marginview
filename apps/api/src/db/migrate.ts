@@ -28,6 +28,14 @@ export async function runMigrations(): Promise<string[]> {
      )`,
   );
   const dir = migrationsDir();
+
+  // schema.sql is the baseline; migrations only alter it. Apply it once on an empty database.
+  const { rows: [base] } = await pool.query<{ t: string | null }>("select to_regclass('public.organizations') as t");
+  if (!base?.t) {
+    console.log("[migrate] empty database, applying schema.sql");
+    await pool.query(fs.readFileSync(path.join(dir, "..", "schema.sql"), "utf8"));
+  }
+
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
   const done = new Set((await pool.query<{ name: string }>("select name from schema_migrations")).rows.map((r) => r.name));
   const applied: string[] = [];

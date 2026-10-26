@@ -1,5 +1,5 @@
 import { CSSProperties, FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 
@@ -9,10 +9,12 @@ import { useAuth } from "../auth/AuthContext";
  * Previously all logins unconditionally navigated to /app, losing context.
  */
 export function Login() {
-  const { login } = useAuth();
+  const { login, user, ready } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const from = (location.state as any)?.from?.pathname ?? "/app";
+  const fromLoc = (location.state as any)?.from;
+  // Keep the query string and hash so deep links survive the sign-in detour.
+  const from: string = fromLoc ? `${fromLoc.pathname}${fromLoc.search ?? ""}${fromLoc.hash ?? ""}` : "/app";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -67,8 +69,11 @@ export function Login() {
           g.renderButton(googleRef.current, { theme: "outline", size: "large", width: 336, text: "signin_with" });
         };
         if ((window as any).google?.accounts?.id) return init();
+        const SRC = "https://accounts.google.com/gsi/client";
+        const existing = document.querySelector<HTMLScriptElement>(`script[src="${SRC}"]`);
+        if (existing) return existing.addEventListener("load", init, { once: true });
         const s = document.createElement("script");
-        s.src = "https://accounts.google.com/gsi/client";
+        s.src = SRC;
         s.async = true;
         s.onload = init;
         document.head.appendChild(s);
@@ -94,6 +99,8 @@ export function Login() {
     }
   }
 
+  if (ready && user) return <Navigate to={from} replace />;
+
   return (
     <div style={pageStyle}>
       <div style={cardStyle}>
@@ -111,8 +118,9 @@ export function Login() {
 
         <form onSubmit={handleSubmit}>
           <div style={fieldStyle}>
-            <label style={labelStyle}>Email address</label>
+            <label htmlFor="login-email" style={labelStyle}>Email address</label>
             <input
+              id="login-email"
               type="email"
               required
               autoComplete="email"
@@ -124,8 +132,9 @@ export function Login() {
           </div>
 
           <div style={fieldStyle}>
-            <label style={labelStyle}>Password</label>
+            <label htmlFor="login-password" style={labelStyle}>Password</label>
             <input
+              id="login-password"
               type="password"
               required
               autoComplete="current-password"

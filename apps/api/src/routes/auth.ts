@@ -17,9 +17,11 @@ export const passwordSchema = z.string().min(8, "Password must be at least 8 cha
 // Compared against when the email is unknown, so response time doesn't reveal which emails exist.
 const DUMMY_HASH = bcrypt.hashSync("marginview-timing-equaliser", BCRYPT_ROUNDS);
 
-// Failed attempts only. 10 per account and 30 per IP per 15 minutes.
+// Failed attempts only, per 15 minutes. 10 per account+IP pair means a stranger guessing at someone's
+// account can't lock the real owner out; 50 per account (any IP) and 30 per IP are the backstops.
 const WINDOW_MS = 15 * 60 * 1000;
-const perEmail = createLimiter({ max: 10, windowMs: WINDOW_MS });
+const perEmail = createLimiter({ max: 50, windowMs: WINDOW_MS });
+const perEmailIp = createLimiter({ max: 10, windowMs: WINDOW_MS });
 const perIp = createLimiter({ max: 30, windowMs: WINDOW_MS });
 const TOO_MANY = "Too many sign-in attempts. Wait 15 minutes and try again.";
 
@@ -94,7 +96,8 @@ authRouter.post("/login", async (req, res) => {
   const email = parsed.data.email.trim().toLowerCase();
   const ipKey = req.ip ?? "unknown";
 
-  if (perEmail.blocked(email) || perIp.blocked(ipKey)) {
+  const pairKey = `${email}|${ipKey}`;
+  if (perEmail.blocked(email) || perEmailIp.blocked(pairKey) || perIp.blocked(ipKey)) {
     return res.status(429).json({ error: TOO_MANY });
   }
 
@@ -112,6 +115,7 @@ authRouter.post("/login", async (req, res) => {
 
   if (!user || !passwordOk) {
     perEmail.hit(email);
+    perEmailIp.hit(pairKey);
     perIp.hit(ipKey);
     const reason = user ? "wrong_password" : "unknown_email";
     void recordEvent({
@@ -152,6 +156,7 @@ authRouter.post("/login", async (req, res) => {
   }
 
   perEmail.reset(email);
+  perEmailIp.reset(pairKey);
   await pool.query("update users set last_login_at = now() where id = $1", [user.id]);
   setSessionCookie(res, signToken({ id: user.id, organizationId: user.organization_id, role: user.role }));
   res.json({ ok: true });

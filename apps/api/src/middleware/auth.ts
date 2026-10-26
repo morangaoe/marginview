@@ -5,7 +5,7 @@ import { pool } from "../db/pool";
 import { AuthedUser } from "../types";
 
 const WEAK_SECRETS = new Set(["dev-secret", "change-me-in-production", "secret", "changeme", "jwt-secret"]);
-const isDeployed = () => process.env.NODE_ENV === "production" || !!process.env.RAILWAY_ENVIRONMENT;
+const isDeployed = () => process.env.NODE_ENV === "production" || !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RENDER;
 
 let cachedSecret: string | null = null;
 

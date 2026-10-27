@@ -14,6 +14,8 @@ COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/
 RUN npm ci -w @marginview/web
 COPY apps/web apps/web
+# Demo.tsx imports the pricing maths straight from the API source, so that source must be present.
+COPY apps/api/src apps/api/src
 RUN npm run build -w @marginview/web
 
 FROM node:20-slim AS deps

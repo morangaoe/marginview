@@ -1,5 +1,5 @@
-import { CSSProperties, FormEvent, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { CSSProperties, FormEvent, useEffect, useRef, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 
@@ -9,23 +9,88 @@ import { useAuth } from "../auth/AuthContext";
  * Previously all logins unconditionally navigated to /app, losing context.
  */
 export function Login() {
-  const { login } = useAuth();
+  const { login, user, ready } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const from = (location.state as any)?.from?.pathname ?? "/app";
+  const fromLoc = (location.state as any)?.from;
+  // Keep the query string and hash so deep links survive the sign-in detour.
+  const from: string = fromLoc ? `${fromLoc.pathname}${fromLoc.search ?? ""}${fromLoc.hash ?? ""}` : "/app";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const googleRef = useRef<HTMLDivElement>(null);
+  const [emailLink, setEmailLink] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function sendLink() {
+    setError(null);
+    setNotice(null);
+    if (!email) return setError("Enter your email address first.");
+    setLoading(true);
+    try {
+      const r = await api.post<{ message: string }>("/auth/magic/request", { email });
+      setNotice(r.message);
+    } catch (err: any) {
+      setError(cleanMessage(err.message) ?? "Couldn't send the link. Try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Google button: shown only when the API has GOOGLE_CLIENT_ID set. Google returns a signed
+  // ID token; the server verifies it and only signs in people who already have an account.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ googleClientId: string | null; emailLink?: boolean }>("/auth/config")
+      .then(({ googleClientId, emailLink: canEmail }) => {
+        if (cancelled) return;
+        setEmailLink(!!canEmail);
+        if (!googleClientId) return;
+        const init = () => {
+          const g = (window as any).google?.accounts?.id;
+          if (!g || !googleRef.current) return;
+          g.initialize({
+            client_id: googleClientId,
+            callback: async (resp: { credential: string }) => {
+              setError(null);
+              try {
+                await api.post("/auth/google", { credential: resp.credential });
+                await login();
+                navigate(from, { replace: true });
+              } catch (err: any) {
+                setError(cleanMessage(err.message) ?? "Google sign-in failed.");
+              }
+            },
+          });
+          g.renderButton(googleRef.current, { theme: "outline", size: "large", width: 336, text: "signin_with" });
+        };
+        if ((window as any).google?.accounts?.id) return init();
+        const SRC = "https://accounts.google.com/gsi/client";
+        const existing = document.querySelector<HTMLScriptElement>(`script[src="${SRC}"]`);
+        if (existing) return existing.addEventListener("load", init, { once: true });
+        const s = document.createElement("script");
+        s.src = SRC;
+        s.async = true;
+        s.onload = init;
+        document.head.appendChild(s);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [login, navigate, from]);
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      const { token } = await api.post<{ token: string }>("/auth/login", { email, password });
-      login(token);
+      await api.post("/auth/login", { email, password });
+      await login();
       navigate(from, { replace: true });
     } catch (err: any) {
       setError(cleanMessage(err.message) ?? "Login failed. Check your email and password.");
@@ -33,6 +98,8 @@ export function Login() {
       setLoading(false);
     }
   }
+
+  if (ready && user) return <Navigate to={from} replace />;
 
   return (
     <div style={pageStyle}>
@@ -45,11 +112,15 @@ export function Login() {
         </div>
 
         {error && <div style={errorBannerStyle}>{error}</div>}
+        {notice && <div style={{ ...errorBannerStyle, background: "var(--card)", color: "var(--ink)", borderColor: "var(--hairline)" }}>{notice}</div>}
+
+        <div ref={googleRef} style={{ display: "flex", justifyContent: "center", marginBottom: 4 }} />
 
         <form onSubmit={handleSubmit}>
           <div style={fieldStyle}>
-            <label style={labelStyle}>Email address</label>
+            <label htmlFor="login-email" style={labelStyle}>Email address</label>
             <input
+              id="login-email"
               type="email"
               required
               autoComplete="email"
@@ -61,8 +132,9 @@ export function Login() {
           </div>
 
           <div style={fieldStyle}>
-            <label style={labelStyle}>Password</label>
+            <label htmlFor="login-password" style={labelStyle}>Password</label>
             <input
+              id="login-password"
               type="password"
               required
               autoComplete="current-password"
@@ -81,6 +153,17 @@ export function Login() {
           >
             {loading ? "Signing in…" : "Sign in"}
           </button>
+          {emailLink && (
+            <button
+              type="button"
+              className="btn"
+              disabled={loading}
+              onClick={sendLink}
+              style={{ width: "100%", padding: "10px 0", marginTop: 8, fontSize: 14 }}
+            >
+              Email me a sign-in link
+            </button>
+          )}
         </form>
 
         <div style={{ textAlign: "center", marginTop: 20, fontSize: 13, color: "var(--slate)" }}>

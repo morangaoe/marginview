@@ -149,31 +149,39 @@ input:focus, select:focus, textarea:focus { border-color: var(--g-500); outline:
 .mv-side .btn { flex-direction: column; align-items: flex-start; text-align: left; padding: 10px 12px; }
 .mv-stat { font: 600 30px var(--font-display); }
 
-/* ═══ APP: glass over nature ═════════════════════════════════════ */
+/* ═══ APP: shiny black, white type, slim panels ═════════════════ */
 .mv-app {
-  --paper: transparent; --card: rgba(18,22,20,.52); --ink: #eef3ef; --slate: #a2ada6; --hairline: rgba(255,255,255,.13);
+  --paper: transparent; --card: rgba(255,255,255,.035); --ink: #ffffff; --slate: rgba(255,255,255,.62); --hairline: rgba(255,255,255,.10);
+  --g-300: #ffffff; --g-400: #f5f5f5; --g-500: #d4d4d4; --accent: #ffffff; --accent-ink: #000000;
+  --radius: 8px;
   position: relative; height: 100%; color: var(--ink);
 }
 .mv-bg {
   position: fixed; inset: 0; z-index: -1;
   background:
-    linear-gradient(rgba(12,16,14,.52), rgba(12,16,14,.78)),
-    radial-gradient(ellipse 80% 60% at 20% 10%, #1f4d3a 0%, transparent 60%),
-    radial-gradient(ellipse 70% 70% at 90% 90%, #12352a 0%, transparent 60%),
-    #0d1512;
+    radial-gradient(ellipse 60% 40% at 15% 0%, rgba(255,255,255,.09) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 45% at 100% 100%, rgba(255,255,255,.05) 0%, transparent 60%),
+    linear-gradient(160deg, #141414 0%, #050505 45%, #0b0b0b 100%);
 }
 .mv-app .card, .mv-glass {
-  background: var(--card);
-  backdrop-filter: blur(24px) saturate(160%); -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border: 1px solid var(--hairline);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 8px 32px rgba(0,0,0,.28);
+  background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.015));
+  backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 18px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 10px 30px rgba(0,0,0,.55);
 }
-.mv-app input, .mv-app select, .mv-app textarea { background: rgba(255,255,255,.06) !important; }
+.mv-app main { color: #fff; }
+.mv-app input, .mv-app select, .mv-app textarea { background: rgba(255,255,255,.05) !important; color: #fff; }
+.mv-app input:focus, .mv-app select:focus, .mv-app textarea:focus { border-color: rgba(255,255,255,.5); box-shadow: 0 0 0 3px rgba(255,255,255,.10); }
+.mv-app .btn { padding: 6px 16px; border-radius: 6px; }
+.mv-app .btn.primary, .mv-app .btn.active { background: #fff; color: #000; border-color: #fff; }
+.mv-app .btn.primary:hover, .mv-app .btn.active:hover { background: #e5e5e5; border-color: #e5e5e5; }
 .mv-app h1 { font-size: 24px !important; font-weight: 600; margin: 0 0 24px !important; }
-.mv-app .app-nav { background: rgba(14,18,16,.5); backdrop-filter: blur(28px) saturate(160%); -webkit-backdrop-filter: blur(28px) saturate(160%); }
-.mv-nav-item { display: block; padding: 9px 14px; margin: 1px 10px; border-radius: 8px; color: var(--slate); text-decoration: none; font-size: 14px; transition: background .15s, color .15s; }
-.mv-nav-item:hover { background: rgba(255,255,255,.06); color: var(--ink); }
-.mv-nav-item.active { background: rgba(74,222,128,.14); color: var(--g-300); font-weight: 500; }
+.mv-app .app-nav { background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.6)); backdrop-filter: blur(28px) saturate(140%); -webkit-backdrop-filter: blur(28px) saturate(140%); }
+.mv-nav-item { display: block; padding: 6px 14px; margin: 3px 12px; border: 1px solid transparent; border-radius: 6px; color: var(--slate); text-decoration: none; font-size: 13px; transition: background .15s, color .15s, border-color .15s; }
+.mv-nav-item:hover { background: rgba(255,255,255,.06); color: #fff; }
+.mv-nav-item.active { background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.05)); border-color: rgba(255,255,255,.18); color: #fff; font-weight: 500; }
+.mv-app .mv-logo i { background: #fff; }
+.mv-app .sk { background: linear-gradient(90deg, rgba(255,255,255,.05) 25%, rgba(255,255,255,.14) 50%, rgba(255,255,255,.05) 75%); background-size: 200% 100%; }
 
 @media (max-width: 860px) {
   .mv-hero, .mv-features, .mv-plans, .mv-demo-grid { grid-template-columns: 1fr; }

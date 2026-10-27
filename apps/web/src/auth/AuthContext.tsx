@@ -1,14 +1,6 @@
-import {
-  createContext,
-  ReactNode,
-  useCallback,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import { request } from "../lib/useApi";
-import { decodeJwt, isExpired, JwtPayload } from "./jwt";
+import { JwtPayload } from "./jwt";
 import { SESSION_ENDED_EVENT } from "./session";
 
 /** The signed-in user as the server sees it right now (GET /api/auth/me). */
@@ -23,10 +15,15 @@ export interface Me {
 }
 
 interface AuthState {
+  /** Truthy while signed in. The real credential is an httpOnly cookie the page can't read. */
   token: string | null;
+  /** Same claims the UI used to read from the JWT, now taken from the server. */
   user: JwtPayload | null;
   me: Me | null;
-  login: (token: string) => void;
+  /** False until the first /auth/me answer, so routes don't flash the login page on reload. */
+  ready: boolean;
+  /** Call after the server has set the session cookie (sign-in, password change). */
+  login: () => Promise<void>;
   logout: () => void;
 }
 
@@ -34,106 +31,55 @@ const AuthContext = createContext<AuthState>({
   token: null,
   user: null,
   me: null,
-  login: () => {},
+  ready: false,
+  login: async () => {},
   logout: () => {},
 });
 
-const TOKEN_KEY = "mv_token";
-
-function loadToken(): string | null {
-  try {
-    const stored = localStorage.getItem(TOKEN_KEY);
-    if (!stored) return null;
-    const payload = decodeJwt(stored);
-    // FIX: if the stored token is already expired on page load, clear it
-    // immediately instead of letting a 401 cascade through every API call.
-    if (!payload || isExpired(payload)) {
-      localStorage.removeItem(TOKEN_KEY);
-      return null;
-    }
-    return stored;
-  } catch {
-    // localStorage may be unavailable in private/sandboxed contexts
-    return null;
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(loadToken);
   const [me, setMe] = useState<Me | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [ready, setReady] = useState(false);
 
-  const user = token ? decodeJwt(token) : null;
+  const refresh = useCallback(async () => {
+    try {
+      setMe(await request<Me>("/auth/me"));
+    } catch {
+      setMe(null);
+    } finally {
+      setReady(true);
+    }
+  }, []);
+
+  // The cookie is the session: ask the server who we are on every page load.
+  useEffect(() => {
+    try {
+      localStorage.removeItem("mv_token"); // tokens from before sessions moved to cookies
+    } catch {
+      /* storage unavailable */
+    }
+    void refresh();
+  }, [refresh]);
+
+  const clearLocal = useCallback(() => setMe(null), []);
 
   const logout = useCallback(() => {
-    try {
-      localStorage.removeItem(TOKEN_KEY);
-    } catch {
-      /* ignore */
-    }
-    setToken(null);
-  }, []);
-
-  const login = useCallback((newToken: string) => {
-    // FIX: validate the incoming token before storing it to avoid persisting
-    // a malformed JWT that would cause a silent redirect loop.
-    const payload = decodeJwt(newToken);
-    if (!payload) {
-      console.error("[auth] login() received an undecodable token — ignoring");
-      return;
-    }
-    if (isExpired(payload)) {
-      console.error("[auth] login() received an already-expired token — ignoring");
-      return;
-    }
-    try {
-      localStorage.setItem(TOKEN_KEY, newToken);
-    } catch {
-      /* ignore storage errors in sandboxed environments */
-    }
-    setToken(newToken);
-  }, []);
-
-  // The server ends sessions on disable or password reset; any 401 lands here.
-  useEffect(() => {
-    window.addEventListener(SESSION_ENDED_EVENT, logout);
-    return () => window.removeEventListener(SESSION_ENDED_EVENT, logout);
-  }, [logout]);
-
-  useEffect(() => {
     setMe(null);
-    if (!token) return;
-    let cancelled = false;
-    request<Me>("/auth/me")
-      .then((m) => !cancelled && setMe(m))
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
+    // Server removes the cookie. Failure is harmless: the session still expires on its own.
+    void request("/auth/logout", { method: "POST" }).catch(() => undefined);
+  }, []);
 
-  // Auto-logout timer: fires when the token hits its expiry time.
+  // The server ends sessions on disable or password reset; any 401 while signed in lands here.
   useEffect(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    if (!user?.exp) return;
+    window.addEventListener(SESSION_ENDED_EVENT, clearLocal);
+    return () => window.removeEventListener(SESSION_ENDED_EVENT, clearLocal);
+  }, [clearLocal]);
 
-    const msLeft = user.exp * 1000 - Date.now();
-    if (msLeft <= 0) {
-      // Already expired (race between load and effect)
-      logout();
-      return;
-    }
-    timerRef.current = setTimeout(logout, msLeft);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [user?.exp, logout]);
+  const user: JwtPayload | null = me
+    ? { id: me.id, sub: me.id, organizationId: me.organizationId, role: me.role, email: me.email }
+    : null;
 
   return (
-    <AuthContext.Provider value={{ token, user, me, login, logout }}>
+    <AuthContext.Provider value={{ token: me ? "session" : null, user, me, ready, login: refresh, logout }}>
       {children}
     </AuthContext.Provider>
   );

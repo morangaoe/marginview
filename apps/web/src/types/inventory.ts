@@ -156,7 +156,7 @@ export interface OptimizedPricingResponse {
 //
 // Same conventions as src/api/client.ts and src/lib/useApi.ts:
 //  - API origin comes from VITE_API_URL (empty locally, so Vite's /api proxy is used)
-//  - auth is a Bearer token from localStorage ("mv_token"), not cookies
+//  - auth is an httpOnly session cookie (credentials: "include"); no token is kept in JS
 // Callers pass full paths that include the "/api" prefix, e.g. "/api/products".
 // ---------------------------------------------------------------------------
 
@@ -170,15 +170,13 @@ export class ApiError extends Error {
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem("mv_token");
-
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
       ...init,
+      credentials: "include", // the session is an httpOnly cookie
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init.headers ?? {}),
       },
     });
@@ -192,7 +190,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
     );
   }
 
-  noteResponseStatus(res.status);
+  noteResponseStatus(res.status, path.replace(/^\/api/, ""));
   if (res.status === 204) return undefined as T;
 
   const body = await res.json().catch(() => undefined);
@@ -203,7 +201,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
     throw new ApiError(res.status, message, body);
   }
 
-  // A 200 with a non-JSON body usually means the request hit the Vercel SPA rewrite
+  // A 200 with a non-JSON body usually means the request hit the SPA fallback
   // (index.html) because VITE_API_URL isn't set. Fail loudly instead of returning undefined.
   if (body === undefined) {
     throw new ApiError(

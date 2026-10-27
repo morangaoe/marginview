@@ -1,11 +1,11 @@
 import "dotenv/config";
-import { NextFunction, Request, Response } from "express";
+import { CookieOptions, NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool";
 import { AuthedUser } from "../types";
 
 const WEAK_SECRETS = new Set(["dev-secret", "change-me-in-production", "secret", "changeme", "jwt-secret"]);
-const isDeployed = () => process.env.NODE_ENV === "production" || !!process.env.RAILWAY_ENVIRONMENT;
+const isDeployed = () => process.env.NODE_ENV === "production" || !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RENDER;
 
 let cachedSecret: string | null = null;
 
@@ -61,6 +61,65 @@ const SESSION_SQL = `
    where u.id = $1 and u.deleted_at is null
    limit 1`;
 
+export const SESSION_COOKIE = "mv_session";
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // matches the token's 12h expiry in signToken
+
+function readCookie(req: Request, name: string): string | null {
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+const isSafeMethod = (m: string) => m === "GET" || m === "HEAD" || m === "OPTIONS";
+
+/** Origins allowed to call the API with a cookie session (same list CORS uses). */
+export function allowedOriginList(): string[] {
+  // Render sets RENDER_EXTERNAL_URL to the service's own address, so login works even before FRONTEND_URL is filled in.
+  const list = (process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174")
+    .split(",")
+    .map((o) => o.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  const own = process.env.RENDER_EXTERNAL_URL?.trim().replace(/\/+$/, "");
+  return own && !list.includes(own) ? [...list, own] : list;
+}
+
+/**
+ * CSRF defence for cookie sessions: a state-changing request must come from our own site.
+ * Browsers always send Origin on these; a missing or foreign one is refused. SameSite=Lax on
+ * the cookie is the second layer.
+ */
+function originAllowed(req: Request): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string") return false;
+  return allowedOriginList().includes(origin.replace(/\/+$/, ""));
+}
+
+function cookieOptions(): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: isDeployed(),
+    sameSite: "lax",
+    path: "/api",
+  };
+}
+
+/** Sets the session cookie; the browser never sees the token itself. */
+export function setSessionCookie(res: Response, token: string): void {
+  res.cookie(SESSION_COOKIE, token, { ...cookieOptions(), maxAge: SESSION_MAX_AGE_MS });
+}
+
+export function clearSessionCookie(res: Response): void {
+  res.clearCookie(SESSION_COOKIE, cookieOptions());
+}
+
 /**
  * Verifies the token, then reloads the user from the database on every request.
  * Organization and role come from the database, never from the token, so disabling
@@ -68,13 +127,23 @@ const SESSION_SQL = `
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) {
+  let raw: string | null = null;
+  if (header?.startsWith("Bearer ")) {
+    raw = header.slice("Bearer ".length);
+  } else {
+    // Browser sessions live in an httpOnly cookie that page scripts cannot read.
+    raw = readCookie(req, SESSION_COOKIE);
+    if (raw && !isSafeMethod(req.method) && !originAllowed(req)) {
+      return res.status(403).json({ error: "Request blocked: it did not come from the Marginview site." });
+    }
+  }
+  if (!raw) {
     return res.status(401).json({ error: "Missing or malformed Authorization header" });
   }
 
   let claims: Record<string, any>;
   try {
-    claims = jwt.verify(header.slice("Bearer ".length), jwtSecret(), { algorithms: ["HS256"] }) as Record<string, any>;
+    claims = jwt.verify(raw, jwtSecret(), { algorithms: ["HS256"] }) as Record<string, any>;
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
   }

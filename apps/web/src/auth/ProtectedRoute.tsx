@@ -13,7 +13,7 @@ import { useAuth } from "./AuthContext";
  * The wizard fires "mv:onboarding-complete" when it finishes so we stop redirecting.
  */
 export function ProtectedRoute() {
-  const { token } = useAuth();
+  const { token, ready } = useAuth();
   const location = useLocation();
   const [required, setRequired] = useState<boolean | null>(null);
 
@@ -34,6 +34,14 @@ export function ProtectedRoute() {
       window.removeEventListener("mv:onboarding-complete", onDone);
     };
   }, [token]);
+
+  if (!ready) {
+    return (
+      <div className="mv-page">
+        <p className="mv-sub">Loading…</p>
+      </div>
+    );
+  }
 
   if (!token) {
     return <Navigate to="/login" state={{ from: location }} replace />;

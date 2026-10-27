@@ -1,0 +1,6 @@
+{$API_HOST} {
+	reverse_proxy api:4000 {
+		# The Pages Function puts the real visitor IP in X-Real-Client-IP; the API's per-IP limits read X-Forwarded-For.
+		header_up X-Forwarded-For {http.request.header.X-Real-Client-IP}
+	}
+}

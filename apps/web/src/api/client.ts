@@ -15,21 +15,15 @@ import { noteResponseStatus } from "../auth/session";
 const API_ORIGIN = import.meta.env.VITE_API_URL ?? "";
 const BASE = `${API_ORIGIN}/api`;
 
-function authHeaders(): Record<string, string> {
-  try {
-    const token = localStorage.getItem("mv_token");
-    return token ? { Authorization: `Bearer ${token}` } : {};
-  } catch {
-    return {};
-  }
-}
+// The session is an httpOnly cookie, so requests just opt in to sending it.
+const CRED: RequestInit = { credentials: "include" };
 
 /**
  * Turns a non-2xx response into a thrown Error whose .message is a
  * human-readable string the UI can display directly.
  */
-async function handle<T>(res: Response): Promise<T> {
-  noteResponseStatus(res.status);
+async function handle<T>(res: Response, path = ""): Promise<T> {
+  noteResponseStatus(res.status, path);
   if (res.status === 204) return undefined as T;
 
   if (res.ok) return res.json();
@@ -63,32 +57,35 @@ async function handle<T>(res: Response): Promise<T> {
 
 export const api = {
   get: <T>(path: string) =>
-    fetch(`${BASE}${path}`, { headers: { ...authHeaders() } }).then((r) => handle<T>(r)),
+    fetch(`${BASE}${path}`, { ...CRED }).then((r) => handle<T>(r, path)),
 
   post: <T>(path: string, body?: unknown) =>
     fetch(`${BASE}${path}`, {
+      ...CRED,
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    }).then((r) => handle<T>(r)),
+    }).then((r) => handle<T>(r, path)),
 
   patch: <T>(path: string, body?: unknown) =>
     fetch(`${BASE}${path}`, {
+      ...CRED,
       method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    }).then((r) => handle<T>(r)),
+    }).then((r) => handle<T>(r, path)),
 
   put: <T>(path: string, body?: unknown) =>
     fetch(`${BASE}${path}`, {
+      ...CRED,
       method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    }).then((r) => handle<T>(r)),
+    }).then((r) => handle<T>(r, path)),
 
   delete: <T>(path: string) =>
     fetch(`${BASE}${path}`, {
+      ...CRED,
       method: "DELETE",
-      headers: { ...authHeaders() },
-    }).then((r) => handle<T>(r)),
+    }).then((r) => handle<T>(r, path)),
 };

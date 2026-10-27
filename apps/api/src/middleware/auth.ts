@@ -82,10 +82,13 @@ const isSafeMethod = (m: string) => m === "GET" || m === "HEAD" || m === "OPTION
 
 /** Origins allowed to call the API with a cookie session (same list CORS uses). */
 export function allowedOriginList(): string[] {
-  return (process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174")
+  // Render sets RENDER_EXTERNAL_URL to the service's own address, so login works even before FRONTEND_URL is filled in.
+  const list = (process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174")
     .split(",")
     .map((o) => o.trim().replace(/\/+$/, ""))
     .filter(Boolean);
+  const own = process.env.RENDER_EXTERNAL_URL?.trim().replace(/\/+$/, "");
+  return own && !list.includes(own) ? [...list, own] : list;
 }
 
 /**

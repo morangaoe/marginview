@@ -20,7 +20,7 @@ export function stripe(): Stripe {
 }
 
 function appUrl(): string {
-  return (process.env.APP_URL ?? process.env.FRONTEND_URL?.split(",")[0] ?? "http://localhost:5173").trim().replace(/\/$/, "");
+  return (process.env.APP_URL ?? process.env.FRONTEND_URL?.split(",")[0] ?? process.env.RENDER_EXTERNAL_URL ?? "http://localhost:5173").trim().replace(/\/$/, "");
 }
 
 /** Recurring unit amount in cents. Annual is 12 months less the annual discount. */

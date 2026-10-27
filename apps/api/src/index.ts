@@ -8,7 +8,7 @@ import { pool } from "./db/pool";
 import { checkScrapingSchema, runMigrations } from "./db/migrate";
 import { drainQueue, startScrapeWorker } from "./queues/scrapeQueue";
 import crypto from "node:crypto";
-import { jwtSecret, requireAuth } from "./middleware/auth";
+import { allowedOriginList, jwtSecret, requireAuth } from "./middleware/auth";
 import { requireModule } from "./middleware/plan";
 import { apiNoStore, securityHeaders } from "./middleware/securityHeaders";
 import { adminRouter } from "./routes/admin";
@@ -33,6 +33,7 @@ import { dashboardRouter } from "./routes/dashboard";
 import { errorsRouter } from "./routes/errors";
 import { platformRouter } from "./routes/platform";
 import { runSchedulerTick, startScrapingScheduler, type SchedulerHandle } from "./services/scraping/scheduler";
+import { bootstrapAdmin } from "./services/bootstrapAdmin";
 import { errorCapture, recordEvent } from "./services/errorLog";
 import { HttpError } from "./utils/http";
 
@@ -43,12 +44,7 @@ const app = express();
 // comma-separated. Falls back to common local dev ports when unset.
 // Trailing slashes are stripped because browsers send Origin without one,
 // and "https://app.vercel.app/" would never match.
-const allowedOrigins = (
-  process.env.FRONTEND_URL || "http://localhost:5173,http://localhost:5174"
-)
-  .split(",")
-  .map((origin) => origin.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
+const allowedOrigins = allowedOriginList();
 
 // Fails fast in production when JWT_SECRET is missing or a placeholder.
 jwtSecret();
@@ -170,6 +166,7 @@ async function migrateOnBoot() {
   } catch (e) {
     console.error("[migrate] startup migration failed:", (e as Error).message);
   }
+  await bootstrapAdmin();
 }
 
 const port = Number(process.env.PORT) || 4000;

@@ -1,4 +1,5 @@
-# Render Blueprint: free web service: the API plus the website it serves. Fill the sync:false values in the Render dashboard.
+# Render Blueprint: free web service: the API plus the website it serves.
+# Render generates the three secrets itself (generateValue). Fill the sync:false values in the Render dashboard.
 services:
   - type: web
     name: marginview-api
@@ -10,15 +11,19 @@ services:
     envVars:
       - key: DATABASE_URL        # Supabase Session pooler URL
         sync: false
-      - key: JWT_SECRET
+      - key: JWT_SECRET          # signs login sessions
+        generateValue: true
+      - key: CRON_SECRET         # copy this value from the Render dashboard into the Supabase pg_cron job
+        generateValue: true
+      - key: ENCRYPTION_KEY      # encrypts API keys customers save in the app; never change it afterwards
+        generateValue: true
+      - key: PLATFORM_ADMIN_EMAILS   # your email; also the first account BOOTSTRAP_ADMIN_PASSWORD creates
         sync: false
-      - key: CRON_SECRET         # same value goes into the pg_cron job
+      - key: BOOTSTRAP_ADMIN_PASSWORD  # first login only; delete this variable after you have signed in
         sync: false
-      - key: FRONTEND_URL
+      - key: FRONTEND_URL        # optional: defaults to this service's own URL; add a custom domain here later
         sync: false
-      - key: APP_URL
-        sync: false
-      - key: PLATFORM_ADMIN_EMAILS
+      - key: APP_URL             # optional: same default
         sync: false
       - key: ALLOW_PUBLIC_SIGNUP
         value: "false"

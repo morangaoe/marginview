@@ -265,7 +265,7 @@ const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
 const LINK_SENT = { ok: true, message: "If that email has a Marginview account, a sign-in link is on its way. It works once and expires in 10 minutes." };
 
 function appUrl(): string {
-  return (process.env.APP_URL ?? process.env.FRONTEND_URL?.split(",")[0] ?? "http://localhost:5173").trim().replace(/\/$/, "");
+  return (process.env.APP_URL ?? process.env.FRONTEND_URL?.split(",")[0] ?? process.env.RENDER_EXTERNAL_URL ?? "http://localhost:5173").trim().replace(/\/$/, "");
 }
 
 /**

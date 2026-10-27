@@ -8,6 +8,14 @@ RUN npm ci -w @marginview/api
 COPY apps/api apps/api
 RUN npm run build -w @marginview/api
 
+FROM node:20-slim AS web
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/web/package.json apps/web/
+RUN npm ci -w @marginview/web
+COPY apps/web apps/web
+RUN npm run build -w @marginview/web
+
 FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -24,6 +32,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /app/apps/api
 COPY --from=deps /app/node_modules /app/node_modules
 COPY --from=build /app/apps/api/dist ./dist
+# The API serves the built website, so one container is the whole app.
+COPY --from=web /app/apps/web/dist /app/apps/web/dist
 # Migrations are read from src/db at runtime (see db/migrate.ts).
 COPY apps/api/src/db ./src/db
 COPY apps/api/package.json ./

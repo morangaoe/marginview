@@ -2,6 +2,8 @@ import "express-async-errors";
 import cors from "cors";
 import "dotenv/config";
 import express from "express";
+import fs from "node:fs";
+import path from "node:path";
 import { pool } from "./db/pool";
 import { checkScrapingSchema, runMigrations } from "./db/migrate";
 import { drainQueue, startScrapeWorker } from "./queues/scrapeQueue";
@@ -57,7 +59,7 @@ if (!process.env.DATABASE_URL) {
   console.warn("[config] DATABASE_URL is not set. Database queries will fail.");
 }
 
-// Railway/Vercel sit behind one proxy hop; without this req.ip is the proxy and every visitor shares one quota.
+// Render sits behind one proxy hop; without this req.ip is the proxy and every visitor shares one quota.
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(securityHeaders);
@@ -123,6 +125,19 @@ app.use("/api/platform", platformRouter);
 app.use("/api", (req, res) => {
   res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
 });
+
+// Serves the built website (apps/web/dist) from the same origin, so no separate static host or /api proxy is needed.
+// Any non-API GET falls back to index.html for client-side routing. Skipped when the build is absent (local dev uses Vite).
+const webDist = process.env.WEB_DIST || path.resolve(__dirname, "..", "..", "web", "dist");
+if (fs.existsSync(path.join(webDist, "index.html"))) {
+  app.use(express.static(webDist, { index: false, maxAge: "1y", immutable: true, setHeaders: (res, file) => {
+    if (!file.includes(`${path.sep}assets${path.sep}`)) res.setHeader("Cache-Control", "no-cache");
+  } }));
+  app.get(/^\/(?!api\/|internal\/|assets\/|health$).*/, (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(webDist, "index.html"));
+  });
+}
 
 // Centralized error handler
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {

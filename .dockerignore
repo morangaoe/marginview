@@ -3,6 +3,6 @@
 .git
 .env
 **/.env
-apps/web
+apps/web/node_modules
 docs
 marginview_context*

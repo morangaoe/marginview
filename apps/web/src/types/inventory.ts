@@ -201,7 +201,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
     throw new ApiError(res.status, message, body);
   }
 
-  // A 200 with a non-JSON body usually means the request hit the Vercel SPA rewrite
+  // A 200 with a non-JSON body usually means the request hit the SPA fallback
   // (index.html) because VITE_API_URL isn't set. Fail loudly instead of returning undefined.
   if (body === undefined) {
     throw new ApiError(

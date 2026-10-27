@@ -1,4 +1,4 @@
-# Render Blueprint: free web service for the API. Fill the sync:false values in the Render dashboard.
+# Render Blueprint: free web service: the API plus the website it serves. Fill the sync:false values in the Render dashboard.
 services:
   - type: web
     name: marginview-api
